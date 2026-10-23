@@ -1,0 +1,4 @@
+<resources>
+    <string name="w_add">Add an expense without opening the app</string>
+    <string name="w_chart">Total spending for the last 6 months</string>
+</resources>
