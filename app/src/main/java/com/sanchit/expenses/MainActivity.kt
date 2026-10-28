@@ -15,11 +15,14 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import java.time.YearMonth
+import java.time.format.TextStyle
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
     private var tab = 0
+    private var openPerson: String? = null // person key shown on the People tab, null = list
     private val openMonths = mutableSetOf(YearMonth.now().toString())
     private val openReports = mutableSetOf(YearMonth.now().toString())
     private lateinit var content: LinearLayout
@@ -39,19 +42,20 @@ class MainActivity : Activity() {
         val header = hbox()
         title = text("Expenses", 21f, C.TEXT, 2)
         header.addView(title, lp(0, WRAP, 1f))
-        val seg = hbox().apply { background = bg(C.CARD, dp(12f), dp(1), C.LINE); setPadding(dp(3), dp(3), dp(3), dp(3)) }
-        tabViews = listOf("Expenses", "Reports").mapIndexed { i, s ->
-            text(s, 13f, C.MUTED, 1).apply {
-                setPadding(dp(12), dp(6), dp(12), dp(6))
-                setOnClickListener { tab = i; render() }
-            }.also { seg.addView(it) }
-        }
-        header.addView(seg)
         header.addView(text("⋮", 22f, C.MUTED, 2).apply {
             setPadding(dp(14), dp(2), dp(4), dp(2))
             setOnClickListener { showMenu(it) }
         })
-        column.addView(header, lp(bottom = dp(18)))
+        column.addView(header, lp(bottom = dp(12)))
+        val seg = hbox().apply { background = bg(C.CARD, dp(12f), dp(1), C.LINE); setPadding(dp(3), dp(3), dp(3), dp(3)) }
+        tabViews = TABS.mapIndexed { i, s ->
+            text(s, 13f, C.MUTED, 1).apply {
+                gravity = Gravity.CENTER
+                setPadding(0, dp(7), 0, dp(7))
+                setOnClickListener { tab = i; openPerson = null; render() }
+            }.also { seg.addView(it, lp(0, WRAP, 1f)) }
+        }
+        column.addView(seg, lp(bottom = dp(18)))
         content = vbox()
         column.addView(content)
         root.addView(ScrollView(this).apply { isFillViewport = true; addView(column) })
@@ -61,7 +65,13 @@ class MainActivity : Activity() {
             setPadding(dp(24), 0, dp(24), 0)
             background = pressable(bg(C.TEXT, dp(28f)))
             elevation = dp(6f)
-            setOnClickListener { openForm(null) }
+            setOnClickListener {
+                when (tab) {
+                    1 -> openDebt(null, "gave")
+                    2 -> Wishlist.showAdd(this@MainActivity) { msg -> toast(msg); render() }
+                    else -> openForm(null)
+                }
+            }
         }
         val fabLp = FrameLayout.LayoutParams(WRAP, dp(54), Gravity.BOTTOM or Gravity.END)
         root.addView(fab, fabLp)
@@ -87,15 +97,286 @@ class MainActivity : Activity() {
 
     private fun openForm(e: Expense?) = EntryDialog.show(this, e) { msg -> toast(msg); render() }
 
+    private fun openDebt(d: Debt?, type: String) =
+        PeopleDialog.show(this, d, type, person = openPersonName()) { msg -> toast(msg); render() }
+
+    private fun openPersonName() = openPerson?.let { k -> Ledger.people(this).firstOrNull { it.key == k }?.name }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) =
+        Contacts.onResult(requestCode, grantResults)
+
     private fun render() {
         tabViews.forEachIndexed { i, v ->
             v.setTextColor(if (i == tab) C.TEXT else C.MUTED)
             v.background = if (i == tab) bg(C.CARD2, dp(9f)) else null
         }
-        title.text = if (tab == 0) "Expenses" else "Reports"
+        title.text = TABS[tab]
         content.removeAllViews()
-        val list = Store.all(this)
-        if (tab == 0) renderExpenses(list) else renderReports(list)
+        when (tab) {
+            0 -> renderExpenses(Store.all(this))
+            1 -> renderPeople()
+            2 -> renderWishlist()
+            else -> renderReports(Store.all(this))
+        }
+        syncBack()
+    }
+
+    // ── Back from a person's page to the People list ──
+    private var backCallback: Any? = null
+
+    private fun syncBack() {
+        if (Build.VERSION.SDK_INT < 33) return
+        val want = tab == 1 && openPerson != null
+        val cb = backCallback as android.window.OnBackInvokedCallback?
+        if (want && cb == null) {
+            val c = android.window.OnBackInvokedCallback { openPerson = null; render() }
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, c)
+            backCallback = c
+        } else if (!want && cb != null) {
+            onBackInvokedDispatcher.unregisterOnBackInvokedCallback(cb)
+            backCallback = null
+        }
+    }
+
+    @Deprecated("Framework Activity API")
+    override fun onBackPressed() {
+        if (tab == 1 && openPerson != null) { openPerson = null; render() }
+        else @Suppress("DEPRECATION") super.onBackPressed()
+    }
+
+    // ── People tab (separate ledger; never mixed with expenses) ──
+    private fun renderPeople() {
+        val people = Ledger.people(this)
+        openPerson?.let { k ->
+            people.firstOrNull { it.key == k }?.let { renderPerson(it); return }
+            openPerson = null
+        }
+        val owed = people.filter { it.balance > 0 }.sumOf { it.balance }
+        val owe = people.filter { it.balance < 0 }.sumOf { -it.balance }
+        val net = owed - owe
+
+        val hero = vbox().apply { background = bg(C.CARD, dp(22f), dp(1), C.LINE); setPadding(dp(18), dp(16), dp(18), dp(18)) }
+        hero.addView(caps("Net balance"))
+        hero.addView(text(balanceText(net), 30f, balanceColor(net), 2), lp(top = dp(4)))
+        hero.addView(text(when {
+            abs(net) < 0.005 -> if (people.isEmpty()) "Track money you lend and borrow" else "All square overall"
+            net > 0 -> "Overall, you'll get this back"
+            else -> "Overall, you owe this"
+        }, 12f, C.DIM))
+        content.addView(hero, lp(bottom = dp(10)))
+
+        val stats = hbox()
+        stats.addView(stat("You'll get", money(owed), C.GREEN), lp(0, WRAP, 1f, end = dp(5)))
+        stats.addView(stat("You owe", money(owe), if (owe > 0) C.RED else C.TEXT), lp(0, WRAP, 1f, start = dp(5)))
+        content.addView(stats, lp(bottom = dp(10)))
+
+        content.addView(peopleActions(), lp(bottom = dp(24)))
+
+        if (people.isEmpty()) {
+            content.addView(empty("No one yet.\nRecord money you gave or got, or split a bill.\nThis is kept apart from your expenses."))
+            return
+        }
+        val (settled, open) = people.partition { it.settled }
+        if (open.isNotEmpty()) {
+            content.addView(text("Open balances", 15f, C.TEXT, 2), lp(bottom = dp(10)))
+            content.addView(card().apply { open.forEach { addView(personRow(it)) } }, lp(bottom = dp(18)))
+        }
+        if (settled.isNotEmpty()) {
+            content.addView(text("Settled", 15f, C.MUTED, 2), lp(bottom = dp(10)))
+            content.addView(card().apply { settled.forEach { addView(personRow(it)) } }, lp(bottom = dp(10)))
+        }
+    }
+
+    private fun peopleActions() = hbox().apply {
+        listOf(
+            Triple("+ Gave", C.TEXT) { openDebt(null, "gave") },
+            Triple("+ Got", C.GREEN) { openDebt(null, "got") },
+            Triple("Split bill", C.TEXT) { PeopleDialog.split(this@MainActivity) { msg -> toast(msg); render() } },
+        ).forEachIndexed { i, (label, color, action) ->
+            addView(text(label, 13.5f, color, 2).apply {
+                gravity = Gravity.CENTER
+                setPadding(0, dp(12), 0, dp(12))
+                background = pressable(bg(if (color == C.GREEN) withAlpha(C.GREEN, 0x24) else C.CARD, dp(14f), dp(1), C.LINE))
+                setOnClickListener { action() }
+            }, lp(0, WRAP, 1f, start = if (i > 0) dp(4) else 0, end = if (i < 2) dp(4) else 0))
+        }
+    }
+
+    private fun personRow(p: Person): View {
+        val r = hbox().apply {
+            setPadding(dp(16), dp(11), dp(16), dp(11))
+            background = pressable()
+            setOnClickListener { openPerson = p.key; render() }
+        }
+        r.addView(avatar(p.name, if (p.settled) C.MUTED else balanceColor(p.balance)), lp(dp(36), dp(36), end = dp(12)))
+        val mid = vbox()
+        mid.addView(text(p.name, 14.5f, if (p.settled) C.MUTED else C.TEXT, 1).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END })
+        mid.addView(text("${balanceWord(p.balance)} · ${dayLabel(p.lastDate)}", 11f, C.DIM), lp(WRAP, WRAP, top = dp(2)))
+        r.addView(mid, lp(0, WRAP, 1f))
+        if (!p.settled) r.addView(text(money(abs(p.balance), false), 14.5f, balanceColor(p.balance), 2), lp(WRAP, WRAP, start = dp(8)))
+        return r
+    }
+
+    private fun renderPerson(p: Person) {
+        content.addView(text("‹  All people", 13.5f, C.MUTED, 1).apply {
+            setPadding(dp(2), dp(4), dp(12), dp(10))
+            setOnClickListener { openPerson = null; render() }
+        })
+
+        val hero = vbox().apply { background = bg(C.CARD, dp(22f), dp(1), C.LINE); setPadding(dp(18), dp(16), dp(18), dp(18)) }
+        val top = hbox()
+        top.addView(avatar(p.name, balanceColor(p.balance)), lp(dp(42), dp(42), end = dp(12)))
+        val who = vbox()
+        who.addView(text(p.name, 18f, C.TEXT, 2).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END })
+        if (p.phone.isNotBlank()) who.addView(text(p.phone, 12f, C.MUTED))
+        top.addView(who, lp(0, WRAP, 1f))
+        hero.addView(top)
+        hero.addView(text(if (p.settled) "Settled up" else money(abs(p.balance)), 28f, if (p.settled) C.MUTED else balanceColor(p.balance), 2), lp(top = dp(14)))
+        hero.addView(text(when {
+            p.settled -> "Nothing owed either way"
+            p.balance > 0 -> "${p.name} owes you"
+            else -> "You owe ${p.name}"
+        }, 12f, C.DIM))
+        content.addView(hero, lp(bottom = dp(10)))
+
+        content.addView(hbox().apply {
+            val buttons = mutableListOf(
+                Triple("+ Gave", C.TEXT) { openDebt(null, "gave") },
+                Triple("+ Got", C.GREEN) { openDebt(null, "got") },
+            )
+            if (!p.settled) buttons += Triple("Settle up", C.TEXT) { settleUp(p) }
+            buttons.forEachIndexed { i, (label, color, action) ->
+                addView(text(label, 13.5f, color, 2).apply {
+                    gravity = Gravity.CENTER
+                    setPadding(0, dp(12), 0, dp(12))
+                    background = pressable(bg(if (color == C.GREEN) withAlpha(C.GREEN, 0x24) else C.CARD, dp(14f), dp(1), C.LINE))
+                    setOnClickListener { action() }
+                }, lp(0, WRAP, 1f, start = if (i > 0) dp(4) else 0, end = if (i < buttons.lastIndex) dp(4) else 0))
+            }
+        }, lp(bottom = dp(24)))
+
+        val gave = p.entries.filter { it.gave }.sumOf { it.amount }
+        val got = p.entries.filter { !it.gave }.sumOf { it.amount }
+        content.addView(text("History", 15f, C.TEXT, 2), lp(bottom = dp(4)))
+        content.addView(text("You gave ${money(gave, false)} · you got ${money(got, false)} · ${p.entries.size} entries", 12f, C.MUTED), lp(bottom = dp(10)))
+        content.addView(card().apply { p.entries.forEach { addView(debtRow(it)) } }, lp(bottom = dp(18)))
+
+        content.addView(text("Delete ${p.name} and all history", 13f, C.RED, 1).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, dp(12), 0, dp(12))
+            setOnClickListener {
+                AlertDialog.Builder(this@MainActivity).setTitle("Delete ${p.name}?")
+                    .setMessage("Removes all ${p.entries.size} entries with ${p.name}. Your expenses are not affected.")
+                    .setPositiveButton("Delete") { _, _ -> Ledger.deletePerson(this@MainActivity, p.key); openPerson = null; toast("${p.name} deleted"); render() }
+                    .setNegativeButton("Cancel", null).show()
+            }
+        })
+    }
+
+    private fun debtRow(d: Debt): View {
+        val r = hbox().apply {
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            background = pressable()
+            setOnClickListener { openDebt(d, d.type) }
+            setOnLongClickListener {
+                AlertDialog.Builder(this@MainActivity).setTitle("Delete this entry?")
+                    .setMessage("${d.person} · ${money(d.amount, false)} · ${dayLabel(d.date)}")
+                    .setPositiveButton("Delete") { _, _ -> Ledger.delete(this@MainActivity, d.id); toast("Entry deleted"); render() }
+                    .setNegativeButton("Cancel", null).show()
+                true
+            }
+        }
+        val color = if (d.gave) C.TEXT else C.GREEN
+        r.addView(text(if (d.gave) "↑" else "↓", 14f, color, 2).apply {
+            gravity = Gravity.CENTER
+            background = bg(withAlpha(color, 0x1F), dp(12f))
+        }, lp(dp(36), dp(36), end = dp(12)))
+        val mid = vbox()
+        mid.addView(text(d.note.ifBlank { if (d.gave) "You gave" else "You got" }, 14.5f, C.TEXT, 1).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END })
+        mid.addView(text("${if (d.gave) "You gave" else "You got"} · ${dayLabel(d.date)}", 11f, C.DIM), lp(WRAP, WRAP, top = dp(2)))
+        r.addView(mid, lp(0, WRAP, 1f))
+        r.addView(text((if (d.gave) "" else "+") + money(d.amount, false), 14.5f, color, 2), lp(WRAP, WRAP, start = dp(8)))
+        return r
+    }
+
+    private fun settleUp(p: Person) {
+        val amt = abs(p.balance)
+        val theyPay = p.balance > 0
+        AlertDialog.Builder(this).setTitle("Settle up with ${p.name}?")
+            .setMessage(if (theyPay) "Records that you got ${money(amt)} back from ${p.name}." else "Records that you paid ${p.name} ${money(amt)}.")
+            .setPositiveButton("Settle") { _, _ ->
+                Ledger.add(this, listOf(Debt("", p.name, p.phone, amt, if (theyPay) "got" else "gave", "Settled up", today().toString(), "")))
+                toast("Settled up with ${p.name}")
+                render()
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun avatar(name: String, color: Int) = text(name.trim().take(1).uppercase(), 15f, color, 2).apply {
+        gravity = Gravity.CENTER
+        background = bg(withAlpha(color, 0x24), dp(18f))
+    }
+
+    private fun card() = vbox().apply { background = bg(C.SURFACE, dp(18f), dp(1), C.LINE); clipToOutline = true; setPadding(0, dp(4), 0, dp(4)) }
+
+    private fun balanceColor(v: Double) = when {
+        abs(v) < 0.005 -> C.TEXT
+        v > 0 -> C.GREEN
+        else -> C.RED
+    }
+
+    private fun balanceText(v: Double, decimals: Boolean = true) = when {
+        abs(v) < 0.005 -> money(0.0, decimals)
+        v > 0 -> "+" + money(v, decimals)
+        else -> "−" + money(-v, decimals)
+    }
+
+    private fun balanceWord(v: Double) = when {
+        abs(v) < 0.005 -> "Settled"
+        v > 0 -> "Owes you"
+        else -> "You owe"
+    }
+
+    // ── Wishlist tab (things to order; removed once ordered) ──
+    private fun renderWishlist() {
+        val items = Wishlist.all(this)
+        val important = items.count { it.important }
+        val hero = vbox().apply { background = bg(C.CARD, dp(22f), dp(1), C.LINE); setPadding(dp(18), dp(16), dp(18), dp(18)) }
+        hero.addView(caps("To order"))
+        hero.addView(text("${items.size} item${if (items.size == 1) "" else "s"}", 30f, C.TEXT, 2), lp(top = dp(4)))
+        hero.addView(text(if (important > 0) "$important marked important" else "Nothing marked important", 12f, if (important > 0) C.AMBER else C.DIM))
+        content.addView(hero, lp(bottom = dp(24)))
+
+        if (items.isEmpty()) {
+            content.addView(empty("Your wishlist is empty.\nTap + Add to note something you need."))
+            return
+        }
+        val (imp, rest) = items.partition { it.important }
+        for ((label, list) in listOf("Important" to imp, "Others" to rest)) {
+            if (list.isEmpty()) continue
+            content.addView(text(label, 15f, if (label == "Important") C.AMBER else C.TEXT, 2), lp(bottom = dp(10)))
+            content.addView(card().apply { list.forEach { addView(wishRow(it)) } }, lp(bottom = dp(18)))
+        }
+        content.addView(text("Tap Ordered when you've bought something — it's removed from the list", 11.5f, C.DIM).apply { gravity = Gravity.CENTER })
+    }
+
+    private fun wishRow(w: WishItem): View {
+        val r = hbox().apply { setPadding(dp(16), dp(10), dp(12), dp(10)) }
+        val color = if (w.important) C.AMBER else C.MUTED
+        r.addView(text(if (w.important) "★" else "•", 15f, color, 2).apply {
+            gravity = Gravity.CENTER
+            background = bg(withAlpha(color, 0x1F), dp(12f))
+        }, lp(dp(36), dp(36), end = dp(12)))
+        val mid = vbox()
+        mid.addView(text(w.name, 14.5f, C.TEXT, 1).apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.END })
+        mid.addView(text("Added ${dayLabel(w.added)}", 11f, C.DIM), lp(WRAP, WRAP, top = dp(2)))
+        r.addView(mid, lp(0, WRAP, 1f))
+        r.addView(text("✓ Ordered", 12.5f, C.GREEN, 2).apply {
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            background = pressable(bg(withAlpha(C.GREEN, 0x1F), dp(10f)))
+            setOnClickListener { Wishlist.confirmOrdered(this@MainActivity, w) { msg -> toast(msg); render() } }
+        }, lp(WRAP, WRAP, start = dp(8)))
+        return r
     }
 
     // ── Expenses tab ──
@@ -162,45 +443,219 @@ class MainActivity : Activity() {
 
     // ── Reports tab ──
     private fun renderReports(list: List<Expense>) {
-        content.addView(text("Monthly breakdown — tap a month for details", 12f, C.DIM), lp(bottom = dp(12)))
-        if (list.isEmpty()) { content.addView(empty("No data yet")); return }
-        for ((month, items) in list.groupBy { it.month }) {
-            val card = monthCard(month, items, openReports)
-            if (month in openReports) {
-                val t = items.totals()
-                val body = vbox().apply { setPadding(dp(14), dp(14), dp(14), dp(16)) }
-                val stats = hbox()
-                listOf(
-                    Triple("Spent", money(t.spent), C.TEXT),
-                    Triple("Received", money(t.received), C.GREEN),
-                    Triple("Net", signed(t.net), if (t.net < 0) C.GREEN else C.TEXT),
-                ).forEachIndexed { i, (l, v, c) ->
-                    stats.addView(stat(l, v, c, small = true), lp(0, WRAP, 1f, start = if (i > 0) dp(3) else 0, end = if (i < 2) dp(3) else 0))
-                }
-                body.addView(stats)
+        val debts = Ledger.all(this)
+        if (list.isEmpty() && debts.isEmpty()) { content.addView(empty("No data yet")); return }
+        if (list.isEmpty()) { content.addView(peopleReport(debts)); return }
+        val now = YearMonth.now()
+        val day = today()
+        val byMonth = list.groupBy { it.month }
 
-                val cats = items.filter { !it.received }.groupBy { it.category }
-                    .mapValues { it.value.sumOf { e -> e.amount } }.entries.sortedByDescending { it.value }
-                if (cats.isNotEmpty()) {
-                    body.addView(caps("By category"), lp(top = dp(18)))
-                    val max = cats.first().value
-                    for ((cat, amt) in cats) {
-                        val line = hbox()
-                        line.addView(text(cat, 12.5f, C.TEXT), lp(0, WRAP, 1f))
-                        line.addView(text("${(amt / t.spent * 100).roundToInt()}%", 11f, C.DIM), lp(WRAP, WRAP, end = dp(8)))
-                        line.addView(text(money(amt), 12.5f, C.TEXT, 1))
-                        body.addView(line, lp(top = dp(10)))
-                        val frac = (amt / max).toFloat().coerceIn(0.02f, 1f)
-                        val track = hbox().apply { background = bg(C.CARD2, dp(3f)) }
-                        track.addView(View(this).apply { background = bg(catColor(cat), dp(3f)) }, lp(0, dp(6), frac))
-                        track.addView(View(this), lp(0, dp(6), 1f - frac))
-                        body.addView(track, lp(top = dp(5)))
-                    }
-                }
-                card.addView(body)
-            }
+        // 1. Last 6 months: spent vs received, with net underneath
+        val months = (5 downTo 0).map { now.minusMonths(it.toLong()) }
+        val mt = months.map { byMonth[it.toString()].orEmpty().totals() }
+        val trend = section("Last 6 months", "Average spend ${money(mt.map { it.spent }.average().roundToInt().toDouble(), false)} a month")
+        trend.addView(legend(listOf("Spent" to C.TEXT, "Received" to C.GREEN)), lp(top = dp(10), bottom = dp(10)))
+        trend.addView(BarChart(this, months.map(::short), listOf(mt.map { it.spent }, mt.map { it.received }), listOf(C.TEXT, C.GREEN), highlight = 5, showValues = false))
+        trend.addView(caps("Net"), lp(top = dp(12)))
+        val netRow = hbox()
+        mt.forEach { t -> netRow.addView(text(signedCompact(t.net), 11f, if (t.net < 0) C.GREEN else C.MUTED, 1).apply { gravity = Gravity.CENTER }, lp(0, WRAP, 1f)) }
+        trend.addView(netRow, lp(top = dp(4)))
+        content.addView(trend, lp(bottom = dp(10)))
+
+        // 2. Spending pace: this month vs last month (cumulative)
+        val last = now.minusMonths(1)
+        val thisCum = cumulative(byMonth[now.toString()].orEmpty(), day.dayOfMonth)
+        val lastCum = cumulative(byMonth[last.toString()].orEmpty(), last.lengthOfMonth())
+        val cur = thisCum.lastOrNull() ?: 0.0
+        val then = lastCum.getOrElse(day.dayOfMonth - 1) { lastCum.lastOrNull() ?: 0.0 }
+        val diff = cur - then
+        val paceSub = when {
+            then == 0.0 -> "${money(cur, false)} spent so far"
+            abs(diff) < 1 -> "Same as by day ${day.dayOfMonth} last month"
+            else -> "${money(abs(diff), false)} ${if (diff > 0) "more" else "less"} than by day ${day.dayOfMonth} last month"
+        }
+        val pace = section("Spending pace", paceSub)
+        pace.addView(legend(listOf(short(now) to C.TEXT, short(last) to 0xFF5A5A5A.toInt())), lp(top = dp(10), bottom = dp(10)))
+        pace.addView(LineChart(this, listOf(lastCum, thisCum), listOf(0xFF5A5A5A.toInt(), C.TEXT), maxOf(now.lengthOfMonth(), last.lengthOfMonth())))
+        content.addView(pace, lp(bottom = dp(10)))
+
+        // 3. Weekday pattern over the last 90 days
+        val since = day.minusDays(89).toString()
+        val wk = DoubleArray(7)
+        list.filter { !it.received && it.date >= since }.forEach { e -> parseDate(e.date)?.let { wk[it.dayOfWeek.value - 1] += e.amount } }
+        val peak = wk.indices.maxByOrNull { wk[it] } ?: 0
+        val days = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+        val week = section("By weekday", if (wk.sum() > 0) "Last 90 days · you spend most on ${days[peak]}" else "Last 90 days")
+        week.addView(BarChart(this, days, listOf(wk.toList()), listOf(C.TEXT), highlight = if (wk.sum() > 0) peak else -1, heightDp = 130), lp(top = dp(12)))
+        content.addView(week, lp(bottom = dp(10)))
+
+        // 4. People ledger (its own data, shown separately)
+        if (debts.isNotEmpty()) content.addView(peopleReport(debts), lp(bottom = dp(10)))
+
+        // 5. Month-by-month detail
+        content.addView(text("Months", 15f, C.TEXT, 2), lp(top = dp(14), bottom = dp(10)))
+        for ((month, items) in byMonth) {
+            val card = monthCard(month, items, openReports)
+            if (month in openReports) card.addView(monthDetail(month, items))
             content.addView(card, lp(bottom = dp(10)))
         }
+    }
+
+    private fun monthDetail(month: String, items: List<Expense>): View {
+        val t = items.totals()
+        val spentItems = items.filter { !it.received }
+        val body = vbox().apply { setPadding(dp(14), dp(14), dp(14), dp(16)) }
+
+        val stats = hbox()
+        listOf(
+            Triple("Spent", money(t.spent), C.TEXT),
+            Triple("Received", money(t.received), C.GREEN),
+            Triple("Net", signed(t.net), if (t.net < 0) C.GREEN else C.TEXT),
+        ).forEachIndexed { i, (l, v, c) ->
+            stats.addView(stat(l, v, c, small = true), lp(0, WRAP, 1f, start = if (i > 0) dp(3) else 0, end = if (i < 2) dp(3) else 0))
+        }
+        body.addView(stats)
+
+        // Category donut + legend
+        val cats = spentItems.groupBy { it.category }.mapValues { it.value.sumOf { e -> e.amount } }.entries.sortedByDescending { it.value }
+        if (cats.isNotEmpty()) {
+            body.addView(caps("By category"), lp(top = dp(20), bottom = dp(12)))
+            val row = hbox()
+            row.addView(Donut(this, cats.map { it.value to catColor(it.key) }, compact(t.spent), "spent"))
+            val leg = vbox()
+            for ((cat, amt) in cats.take(6)) {
+                val r = hbox()
+                r.addView(View(this).apply { background = bg(catColor(cat), dp(3f)) }, lp(dp(8), dp(8), end = dp(8)))
+                r.addView(text(cat, 12.5f, C.TEXT).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }, lp(0, WRAP, 1f))
+                r.addView(text("${(amt / t.spent * 100).roundToInt()}%", 11f, C.DIM), lp(WRAP, WRAP, start = dp(6), end = dp(6)))
+                r.addView(text(money(amt, false), 12.5f, C.TEXT, 1))
+                leg.addView(r, lp(bottom = dp(8)))
+            }
+            if (cats.size > 6) leg.addView(text("+${cats.size - 6} more", 11f, C.DIM))
+            row.addView(leg, lp(0, WRAP, 1f, start = dp(16)))
+            body.addView(row)
+        }
+
+        // Daily bars + highlights (only for real months)
+        val ym = runCatching { YearMonth.parse(month) }.getOrNull() ?: return body
+        val len = ym.lengthOfMonth()
+        val daily = DoubleArray(len)
+        spentItems.forEach { e -> e.date.takeLast(2).toIntOrNull()?.let { if (it in 1..len) daily[it - 1] += e.amount } }
+        val isCurrent = ym == YearMonth.now()
+        body.addView(caps("Daily spending"), lp(top = dp(18), bottom = dp(8)))
+        body.addView(BarChart(
+            this, (1..len).map { if (it == 1 || it % 5 == 0) "$it" else "" }, listOf(daily.toList()), listOf(C.TEXT),
+            highlight = if (isCurrent) today().dayOfMonth - 1 else -1, showValues = false, heightDp = 110,
+        ))
+
+        val elapsed = if (isCurrent) today().dayOfMonth else len
+        val biggest = spentItems.maxByOrNull { it.amount }
+        val grid = listOf(
+            Triple("Avg / day", money((t.spent / elapsed).roundToInt().toDouble(), false), "over $elapsed days"),
+            Triple("Biggest", biggest?.let { money(it.amount, false) } ?: "—", biggest?.let { it.note.ifBlank { it.category }.capFirst() } ?: ""),
+            Triple("Top category", cats.firstOrNull()?.key ?: "—", cats.firstOrNull()?.let { "${(it.value / t.spent * 100).roundToInt()}% of spend" } ?: ""),
+            Triple("Entries", "${items.size}", "on ${daily.count { it > 0 }} days"),
+        )
+        for (pair in grid.chunked(2)) {
+            val r = hbox()
+            pair.forEachIndexed { i, (l, v, s) -> r.addView(tile(l, v, s), lp(0, WRAP, 1f, start = if (i > 0) dp(4) else 0, end = if (i == 0) dp(4) else 0)) }
+            body.addView(r, lp(top = dp(8)))
+        }
+        return body
+    }
+
+    /** Lend / borrow metrics from the People ledger. Not counted in any expense figure. */
+    private fun peopleReport(debts: List<Debt>): View {
+        val people = Ledger.people(this)
+        val open = people.filter { !it.settled }
+        val owed = open.filter { it.balance > 0 }
+        val owe = open.filter { it.balance < 0 }
+        val owedSum = owed.sumOf { it.balance }
+        val oweSum = owe.sumOf { -it.balance }
+
+        val sec = section("People", if (open.isEmpty()) "Everyone is settled up" else "${open.size} open balance${if (open.size == 1) "" else "s"} · kept apart from expenses")
+        val stats = hbox()
+        listOf(
+            Triple("You'll get", money(owedSum, false), C.GREEN),
+            Triple("You owe", money(oweSum, false), if (oweSum > 0) C.RED else C.TEXT),
+            Triple("Net", balanceText(owedSum - oweSum, false), balanceColor(owedSum - oweSum)),
+        ).forEachIndexed { i, (l, v, c) ->
+            stats.addView(stat(l, v, c, small = true), lp(0, WRAP, 1f, start = if (i > 0) dp(3) else 0, end = if (i < 2) dp(3) else 0))
+        }
+        sec.addView(stats, lp(top = dp(12)))
+
+        // Gave vs got over the last 6 months
+        val now = YearMonth.now()
+        val months = (5 downTo 0).map { now.minusMonths(it.toLong()) }
+        val byMonth = debts.groupBy { it.month }
+        val gave = months.map { m -> byMonth[m.toString()].orEmpty().filter { it.gave }.sumOf { it.amount } }
+        val got = months.map { m -> byMonth[m.toString()].orEmpty().filter { !it.gave }.sumOf { it.amount } }
+        sec.addView(legend(listOf("You gave" to C.TEXT, "You got" to C.GREEN)), lp(top = dp(16), bottom = dp(10)))
+        sec.addView(BarChart(this, months.map(::short), listOf(gave, got), listOf(C.TEXT, C.GREEN), highlight = 5, showValues = false, heightDp = 120))
+
+        // Who owes the most, both ways
+        fun top(title: String, list: List<Person>, color: Int) {
+            if (list.isEmpty()) return
+            sec.addView(caps(title), lp(top = dp(18), bottom = dp(8)))
+            for (p in list.sortedByDescending { abs(it.balance) }.take(3)) {
+                val r = hbox().apply { setOnClickListener { tab = 1; openPerson = p.key; render() } }
+                r.addView(text(p.name, 13f, C.TEXT).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }, lp(0, WRAP, 1f))
+                r.addView(text(money(abs(p.balance), false), 13f, color, 1))
+                sec.addView(r, lp(bottom = dp(8)))
+            }
+        }
+        top("Owe you the most", owed, C.GREEN)
+        top("You owe the most", owe, C.RED)
+
+        val ym = now.toString()
+        val thisMonth = debts.filter { it.month == ym }
+        val oldest = open.minByOrNull { it.lastDate }
+        val idle = oldest?.let { parseDate(it.lastDate) }?.let { java.time.temporal.ChronoUnit.DAYS.between(it, today()) }
+        val grid = listOf(
+            Triple("Gave this month", money(thisMonth.filter { it.gave }.sumOf { it.amount }, false), "${thisMonth.count { it.gave }} entries"),
+            Triple("Got this month", money(thisMonth.filter { !it.gave }.sumOf { it.amount }, false), "${thisMonth.count { !it.gave }} entries"),
+            Triple("Oldest open", oldest?.name ?: "—", idle?.let { if (it == 0L) "active today" else "no activity for $it days" } ?: ""),
+            Triple("Splits", "${debts.filter { it.note.startsWith("Split") }.distinctBy { it.createdAt }.size}", "shared bills recorded"),
+        )
+        for (pair in grid.chunked(2)) {
+            val r = hbox()
+            pair.forEachIndexed { i, (l, v, s) -> r.addView(tile(l, v, s), lp(0, WRAP, 1f, start = if (i > 0) dp(4) else 0, end = if (i == 0) dp(4) else 0)) }
+            sec.addView(r, lp(top = dp(8)))
+        }
+        return sec
+    }
+
+    private fun cumulative(items: List<Expense>, upTo: Int): List<Double> {
+        val daily = DoubleArray(upTo)
+        items.filter { !it.received }.forEach { e -> e.date.takeLast(2).toIntOrNull()?.let { if (it in 1..upTo) daily[it - 1] += e.amount } }
+        var sum = 0.0
+        return daily.map { sum += it; sum }
+    }
+
+    private fun short(ym: YearMonth) = ym.month.getDisplayName(TextStyle.SHORT, Locale.ENGLISH)
+
+    private fun signedCompact(v: Double) = (if (v < 0) "−" else "") + compact(abs(v))
+
+    private fun section(title: String, sub: String) = vbox().apply {
+        background = bg(C.SURFACE, dp(18f), dp(1), C.LINE)
+        setPadding(dp(16), dp(14), dp(16), dp(14))
+        addView(text(title, 14.5f, C.TEXT, 2))
+        addView(text(sub, 12f, C.MUTED), lp(top = dp(2)))
+    }
+
+    private fun legend(items: List<Pair<String, Int>>) = hbox().apply {
+        for ((label, color) in items) {
+            addView(View(context).apply { background = bg(color, dp(3f)) }, lp(dp(8), dp(8), end = dp(6)))
+            addView(text(label, 11.5f, C.MUTED), lp(WRAP, WRAP, end = dp(14)))
+        }
+    }
+
+    private fun tile(label: String, value: String, sub: String) = vbox().apply {
+        background = bg(C.CARD, dp(12f), dp(1), C.LINE)
+        setPadding(dp(12), dp(10), dp(10), dp(10))
+        addView(caps(label))
+        addView(text(value, 15f, C.TEXT, 2).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }, lp(top = dp(3)))
+        addView(text(sub, 11f, C.DIM).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END })
     }
 
     // ── Shared bits ──
@@ -372,5 +827,6 @@ class MainActivity : Activity() {
         const val REQ_EXPORT_JSON = 1
         const val REQ_EXPORT_CSV = 2
         const val REQ_IMPORT = 3
+        val TABS = listOf("Expenses", "People", "Wishlist", "Reports")
     }
 }

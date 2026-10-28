@@ -30,6 +30,7 @@ object C {
     const val GREEN = 0xFF34D399.toInt()
     const val GREEN_D = 0xFF10B981.toInt()
     const val RED = 0xFFFB7185.toInt()
+    const val AMBER = 0xFFFBBF24.toInt()
 }
 
 private val CATEGORY_COLORS = mapOf(
