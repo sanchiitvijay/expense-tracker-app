@@ -10,14 +10,14 @@ Data is stored on the phone (`files/expenses.json`, app-private). No server, no 
   weekday pattern, and per month a category donut, daily spending bars and highlights
 - People tab (separate ledger in `files/ledger.json`, never mixed with expenses): record money you
   gave or got per person, see who owes you / whom you owe, per-person history, Settle up, and
-  Split bill (equal split; if you paid, each person owes you their share; if someone else paid,
+  Split bill (equally, by %, or by exact amounts per person — it checks they add up to 100% / the bill; if you paid, each person owes you their share; if someone else paid,
   your share is recorded as owed to them). Names can be suggested from your contacts (read-only,
   asked on first use) — nothing is sent anywhere
 - Wishlist tab (own file `files/wishlist.json`): note things you need to order, optionally tagged
   ★ Important (shown first). Tap ✓ Ordered once bought and it's removed
 - Reports also show a People section: you'll get / you owe / net, 6-month gave vs got, top
   balances both ways, this month's activity, oldest open balance and number of splits
-- ⋮ menu: Export JSON backup, Export CSV, Import JSON/CSV, Purge data (by months or date range)
+- ⋮ menu: Export JSON backup (expenses + People + Wishlist), Export CSV (expenses only), Import JSON/CSV, Purge data (by months or date range)
 - Widgets:
   - **Quick add** (3×3, resizable): scrollable list of every entry from the last 7 days with the
     7-day net, plus `+ Spent` / `+ Got` buttons. Buttons add, tapping an entry edits it — both in a

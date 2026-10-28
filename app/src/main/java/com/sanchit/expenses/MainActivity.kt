@@ -715,7 +715,8 @@ class MainActivity : Activity() {
     }
 
     private fun export(json: Boolean) {
-        if (Store.all(this).isEmpty()) { toast("Nothing to export"); return }
+        val nothing = Store.all(this).isEmpty() && (!json || (Ledger.all(this).isEmpty() && Wishlist.all(this).isEmpty()))
+        if (nothing) { toast(if (json) "Nothing to export" else "No expenses to export (People and Wishlist are in the JSON backup)"); return }
         val ext = if (json) "json" else "csv"
         startActivityForResult(
             Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
@@ -733,9 +734,12 @@ class MainActivity : Activity() {
             when (requestCode) {
                 REQ_EXPORT_JSON, REQ_EXPORT_CSV -> {
                     val list = Store.all(this)
-                    val out = if (requestCode == REQ_EXPORT_JSON) Backup.toJson(list) else Backup.toCsv(list)
+                    val json = requestCode == REQ_EXPORT_JSON
+                    val people = Ledger.all(this)
+                    val wish = Wishlist.all(this)
+                    val out = if (json) Backup.toFullJson(list, people, wish) else Backup.toCsv(list)
                     contentResolver.openOutputStream(uri, "wt")!!.use { it.write(out.toByteArray(Charsets.UTF_8)) }
-                    toast("Exported ${list.size} entries")
+                    toast(if (json) "Exported ${list.size} expenses, ${people.size} people entries, ${wish.size} wishlist items" else "Exported ${list.size} entries")
                 }
                 REQ_IMPORT -> {
                     val txt = contentResolver.openInputStream(uri)!!.use { it.readBytes().toString(Charsets.UTF_8) }
@@ -750,10 +754,23 @@ class MainActivity : Activity() {
     private fun previewImport(p: Backup.Parsed) {
         val ids = Store.all(this).mapTo(HashSet()) { it.id }
         val fresh = p.valid.count { it.id.isBlank() || it.id !in ids }
-        val b = AlertDialog.Builder(this).setTitle("Import entries")
-            .setMessage("New: $fresh\nAlready here: ${p.valid.size - fresh}\nInvalid rows: ${p.invalid}\n\nEntries that already exist are skipped.")
-        if (fresh > 0) b.setPositiveButton("Import $fresh") { _, _ ->
-            toast("Imported ${Store.import(this, p)} entries")
+        val debtIds = Ledger.all(this).mapTo(HashSet()) { it.id }
+        val freshPeople = p.people.count { it.id.isBlank() || it.id !in debtIds }
+        val wishIds = Wishlist.all(this).mapTo(HashSet()) { it.id }
+        val freshWish = p.wishlist.count { it.id.isBlank() || it.id !in wishIds }
+        val total = fresh + freshPeople + freshWish
+
+        val msg = StringBuilder("Expenses — new: $fresh, already here: ${p.valid.size - fresh}, invalid rows: ${p.invalid}")
+        if (p.people.isNotEmpty()) msg.append("\nPeople entries — new: $freshPeople, already here: ${p.people.size - freshPeople}")
+        if (p.wishlist.isNotEmpty()) msg.append("\nWishlist items — new: $freshWish, already here: ${p.wishlist.size - freshWish}")
+        msg.append("\n\nAnything that already exists is skipped.")
+        val b = AlertDialog.Builder(this).setTitle("Import backup").setMessage(msg)
+        if (total > 0) b.setPositiveButton("Import $total") { _, _ ->
+            val e = Store.import(this, p)
+            val d = Ledger.import(this, p.people)
+            val w = Wishlist.import(this, p.wishlist)
+            toast(listOfNotNull("$e expenses", "$d people entries".takeIf { p.people.isNotEmpty() }, "$w wishlist items".takeIf { p.wishlist.isNotEmpty() })
+                .joinToString(", ", prefix = "Imported "))
             render()
         }.setNegativeButton("Cancel", null) else b.setPositiveButton("OK", null)
         b.show()

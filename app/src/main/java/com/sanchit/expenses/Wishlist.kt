@@ -38,20 +38,13 @@ object Wishlist {
         items?.let { return it }
         val f = file(ctx)
         val list = if (f.baseFile.exists()) runCatching {
-            val arr = JSONObject(String(f.readFully(), Charsets.UTF_8)).optJSONArray("items") ?: JSONArray()
-            (0 until arr.length()).mapNotNull { i ->
-                arr.optJSONObject(i)?.let { WishItem(it.optString("id"), it.optString("name"), it.optBoolean("important"), it.optString("createdAt")) }
-                    ?.takeIf { it.name.isNotBlank() }
-            }
+            fromArray(JSONObject(String(f.readFully(), Charsets.UTF_8)).optJSONArray("items") ?: JSONArray())
         }.getOrDefault(emptyList()) else emptyList()
         return list.toMutableList().also { items = it }
     }
 
     private fun save(ctx: Context) {
-        val arr = JSONArray()
-        for (w in data(ctx).sortedWith(WISH_ORDER)) arr.put(
-            JSONObject().put("id", w.id).put("name", w.name).put("important", w.important).put("createdAt", w.createdAt)
-        )
+        val arr = toArray(data(ctx))
         val f = file(ctx)
         val out = f.startWrite()
         try {
@@ -64,13 +57,35 @@ object Wishlist {
         Widgets.refresh(ctx)
     }
 
+    /** Same shape in the app file and in the JSON backup. */
+    fun toArray(list: List<WishItem>) = JSONArray().apply {
+        for (w in list.sortedWith(WISH_ORDER)) put(JSONObject().put("id", w.id).put("name", w.name).put("important", w.important).put("createdAt", w.createdAt))
+    }
+
+    fun fromArray(arr: JSONArray): List<WishItem> = (0 until arr.length()).mapNotNull { i ->
+        arr.optJSONObject(i)?.let { WishItem(it.optString("id"), it.optString("name").trim(), it.optBoolean("important"), it.optString("createdAt")) }
+            ?.takeIf { it.name.isNotBlank() }
+    }
+
+    /** Adds items whose id isn't already stored. Returns how many were added. */
+    @Synchronized
+    fun import(ctx: Context, list: List<WishItem>): Int {
+        val ids = data(ctx).mapTo(HashSet()) { it.id }
+        val fresh = list.filter { it.id.isBlank() || it.id !in ids }.map {
+            it.copy(id = it.id.ifBlank { newId() }, createdAt = it.createdAt.ifBlank { Instant.now().toString() })
+        }
+        if (fresh.isNotEmpty()) { data(ctx).addAll(fresh); save(ctx) }
+        return fresh.size
+    }
+
+    private fun newId() = java.lang.Long.toHexString(System.currentTimeMillis()) + (1..8).map { "0123456789abcdef"[Random.nextInt(16)] }.joinToString("")
+
     @Synchronized
     fun all(ctx: Context): List<WishItem> = data(ctx).sortedWith(WISH_ORDER)
 
     @Synchronized
     fun add(ctx: Context, name: String, important: Boolean) {
-        val id = java.lang.Long.toHexString(System.currentTimeMillis()) + (1..8).map { "0123456789abcdef"[Random.nextInt(16)] }.joinToString("")
-        data(ctx).add(WishItem(id, name.trim().capFirst(), important, Instant.now().toString()))
+        data(ctx).add(WishItem(newId(), name.trim().capFirst(), important, Instant.now().toString()))
         save(ctx)
     }
 

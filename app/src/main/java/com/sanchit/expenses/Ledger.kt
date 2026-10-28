@@ -49,7 +49,7 @@ object Ledger {
     private fun data(ctx: Context): MutableList<Debt> {
         items?.let { return it }
         val f = file(ctx)
-        val list = if (f.baseFile.exists()) runCatching { parse(String(f.readFully(), Charsets.UTF_8)) }.getOrDefault(emptyList()) else emptyList()
+        val list = if (f.baseFile.exists()) runCatching { fromArray(JSONObject(String(f.readFully(), Charsets.UTF_8)).optJSONArray("entries") ?: JSONArray()) }.getOrDefault(emptyList()) else emptyList()
         return list.toMutableList().also { items = it }
     }
 
@@ -57,7 +57,7 @@ object Ledger {
         val f = file(ctx)
         val out = f.startWrite()
         try {
-            out.write(toJson(data(ctx)).toByteArray(Charsets.UTF_8))
+            out.write(JSONObject().put("format", "expenses-ledger").put("version", 1).put("entries", toArray(data(ctx))).toString(2).toByteArray(Charsets.UTF_8))
             f.finishWrite(out)
         } catch (e: Exception) {
             f.failWrite(out)
@@ -105,23 +105,32 @@ object Ledger {
         save(ctx)
     }
 
-    private fun toJson(list: List<Debt>): String {
-        val arr = JSONArray()
-        for (d in list.sortedWith(DEBT_ORDER)) arr.put(
+    /** Adds entries whose id isn't already stored. Returns how many were added. */
+    @Synchronized
+    fun import(ctx: Context, list: List<Debt>): Int {
+        val ids = data(ctx).mapTo(HashSet()) { it.id }
+        val fresh = list.filter { it.id.isBlank() || it.id !in ids }.map {
+            it.copy(id = it.id.ifBlank { newId() }, createdAt = it.createdAt.ifBlank { Instant.now().toString() })
+        }
+        if (fresh.isNotEmpty()) { data(ctx).addAll(fresh); save(ctx) }
+        return fresh.size
+    }
+
+    /** Same shape in the app file and in the JSON backup. */
+    fun toArray(list: List<Debt>) = JSONArray().apply {
+        for (d in list.sortedWith(DEBT_ORDER)) put(
             JSONObject().put("id", d.id).put("person", d.person).put("phone", d.phone).put("amount", d.amount)
                 .put("type", d.type).put("note", d.note).put("date", d.date).put("createdAt", d.createdAt)
         )
-        return JSONObject().put("format", "expenses-ledger").put("version", 1).put("entries", arr).toString(2)
     }
 
-    private fun parse(raw: String): List<Debt> {
-        val arr = JSONObject(raw).optJSONArray("entries") ?: return emptyList()
-        return (0 until arr.length()).mapNotNull { i ->
-            val o = arr.optJSONObject(i) ?: return@mapNotNull null
-            Debt(
-                o.optString("id"), o.optString("person"), o.optString("phone"), o.optDouble("amount", 0.0),
-                if (o.optString("type") == "got") "got" else "gave", o.optString("note"), o.optString("date"), o.optString("createdAt"),
-            ).takeIf { it.amount > 0 && it.person.isNotBlank() }
-        }
+    private val DATE = Regex("""\d{4}-\d{2}-\d{2}""")
+
+    fun fromArray(arr: JSONArray): List<Debt> = (0 until arr.length()).mapNotNull { i ->
+        val o = arr.optJSONObject(i) ?: return@mapNotNull null
+        Debt(
+            o.optString("id"), o.optString("person").trim(), o.optString("phone"), o.optDouble("amount", 0.0),
+            if (o.optString("type") == "got") "got" else "gave", o.optString("note"), o.optString("date").take(10), o.optString("createdAt"),
+        ).takeIf { it.amount > 0 && it.person.isNotBlank() && DATE.matches(it.date) }
     }
 }
