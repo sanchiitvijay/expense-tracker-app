@@ -139,14 +139,18 @@ object Backup {
     private val COLUMNS = listOf("id", "date", "type", "category", "amount", "note", "createdAt")
     private val DATE = Regex("""\d{4}-\d{2}-\d{2}""")
 
-    /** [people] and [wishlist] are only present in this app's full JSON backup. */
-    class Parsed(val valid: List<Expense>, val invalid: Int, val people: List<Debt> = emptyList(), val wishlist: List<WishItem> = emptyList())
+    /** [people], [wishlist] and [ideas] are only present in this app's full JSON backup. */
+    class Parsed(
+        val valid: List<Expense>, val invalid: Int, val people: List<Debt> = emptyList(),
+        val wishlist: List<WishItem> = emptyList(), val ideas: List<WishItem> = emptyList(),
+    )
 
     private fun num(d: Double) = if (d % 1.0 == 0.0) d.toLong().toString() else d.toString()
 
-    /** Export file: expenses (same format as before) plus the People ledger and the wishlist. */
-    fun toFullJson(list: List<Expense>, people: List<Debt>, wishlist: List<WishItem>): String =
-        JSONObject(toJson(list)).put("people", Ledger.toArray(people)).put("wishlist", Wishlist.toArray(wishlist)).toString(2)
+    /** Export file: expenses (same format as before) plus the People ledger, the wishlist and ideas. */
+    fun toFullJson(list: List<Expense>, people: List<Debt>, wishlist: List<WishItem>, ideas: List<WishItem>): String =
+        JSONObject(toJson(list)).put("people", Ledger.toArray(people)).put("wishlist", Wishlist.toArray(wishlist))
+            .put("ideas", Ideas.toArray(ideas)).toString(2)
 
     fun toJson(list: List<Expense>): String {
         val arr = JSONArray()
@@ -181,6 +185,7 @@ object Backup {
         val text = raw.removePrefix("\uFEFF").trim()
         var people = emptyList<Debt>()
         var wishlist = emptyList<WishItem>()
+        var ideas = emptyList<WishItem>()
         val records = try {
             when {
                 text.startsWith("[") -> jsonRecords(JSONArray(text))
@@ -188,8 +193,9 @@ object Backup {
                     val o = JSONObject(text)
                     people = o.optJSONArray("people")?.let(Ledger::fromArray).orEmpty()
                     wishlist = o.optJSONArray("wishlist")?.let(Wishlist::fromArray).orEmpty()
+                    ideas = o.optJSONArray("ideas")?.let(Ideas::fromArray).orEmpty()
                     val ex = o.optJSONArray("expenses")
-                    if (ex == null && !o.has("people") && !o.has("wishlist")) throw IllegalArgumentException("No expenses found in this file.")
+                    if (ex == null && !o.has("people") && !o.has("wishlist") && !o.has("ideas")) throw IllegalArgumentException("No expenses found in this file.")
                     jsonRecords(ex ?: JSONArray())
                 }
                 else -> csvRecords(text)
@@ -200,7 +206,7 @@ object Backup {
         val valid = ArrayList<Expense>()
         var invalid = 0
         for (r in records) normalise(r)?.let { valid.add(it) } ?: invalid++
-        return Parsed(valid, invalid, people, wishlist)
+        return Parsed(valid, invalid, people, wishlist, ideas)
     }
 
     private fun jsonRecords(arr: JSONArray): List<Map<String, Any?>> = (0 until arr.length()).map { i ->

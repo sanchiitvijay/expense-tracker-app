@@ -19,7 +19,7 @@ import java.io.File
 import java.time.Instant
 import kotlin.random.Random
 
-/** Something you need to order. Removed from the list once ordered. */
+/** An entry in a simple list (wishlist item, idea). Removed from the list once done. */
 data class WishItem(val id: String, val name: String, val important: Boolean, val createdAt: String) {
     /** Local date it was added (createdAt is UTC). */
     val added get() = runCatching { Instant.parse(createdAt).atZone(java.time.ZoneId.systemDefault()).toLocalDate().toString() }.getOrDefault("")
@@ -28,11 +28,43 @@ data class WishItem(val id: String, val name: String, val important: Boolean, va
 /** Important first, then newest first. */
 val WISH_ORDER = compareByDescending<WishItem> { it.important }.thenByDescending { it.createdAt }
 
-/** Local storage for the wishlist: one JSON file in app-private storage, separate from expenses and people. */
-object Wishlist {
+/** Things you need to order. */
+object Wishlist : ItemList(
+    fileName = "wishlist.json", format = "expenses-wishlist",
+    heading = "To order", addTitle = "Add to wishlist", hint = "What do you need?",
+    emptyText = "Your wishlist is empty.\nTap + Add to note something you need.",
+    doneButton = "✓ Ordered", doneVerb = "Ordered", doneTitle = { "Ordered $it?" },
+    doneMessage = "It will be removed from your wishlist.",
+    footer = "Tap Ordered when you've bought something — it's removed from the list",
+)
+
+/** Ideas to jot down; same behaviour as the wishlist, own file. */
+object Ideas : ItemList(
+    fileName = "ideas.json", format = "expenses-ideas",
+    heading = "Ideas", addTitle = "Add idea", hint = "What's the idea?",
+    emptyText = "No ideas yet.\nTap + Add to jot one down.",
+    doneButton = "✓ Done", doneVerb = "Done", doneTitle = { "Done with $it?" },
+    doneMessage = "It will be removed from your ideas.",
+    footer = "Tap Done once you've acted on an idea — it's removed from the list",
+)
+
+/** Local storage for a simple list: one JSON file in app-private storage, separate from expenses and people. */
+open class ItemList(
+    private val fileName: String,
+    private val format: String,
+    val heading: String,
+    private val addTitle: String,
+    private val hint: String,
+    val emptyText: String,
+    val doneButton: String,
+    private val doneVerb: String,
+    private val doneTitle: (String) -> String,
+    private val doneMessage: String,
+    val footer: String,
+) {
     private var items: MutableList<WishItem>? = null
 
-    private fun file(ctx: Context) = AtomicFile(File(ctx.filesDir, "wishlist.json"))
+    private fun file(ctx: Context) = AtomicFile(File(ctx.filesDir, fileName))
 
     private fun data(ctx: Context): MutableList<WishItem> {
         items?.let { return it }
@@ -48,7 +80,7 @@ object Wishlist {
         val f = file(ctx)
         val out = f.startWrite()
         try {
-            out.write(JSONObject().put("format", "expenses-wishlist").put("version", 1).put("items", arr).toString(2).toByteArray(Charsets.UTF_8))
+            out.write(JSONObject().put("format", format).put("version", 1).put("items", arr).toString(2).toByteArray(Charsets.UTF_8))
             f.finishWrite(out)
         } catch (e: Exception) {
             f.failWrite(out)
@@ -95,6 +127,14 @@ object Wishlist {
         save(ctx)
     }
 
+    /** Removes every item. Returns how many were removed. */
+    @Synchronized
+    fun clear(ctx: Context): Int {
+        val n = data(ctx).size
+        if (n > 0) { data(ctx).clear(); save(ctx) }
+        return n
+    }
+
     /** Bottom sheet to add an item. Used by the app and the Wishlist widget popup. */
     fun showAdd(act: Activity, onDismiss: (() -> Unit)? = null, onSaved: (message: String) -> Unit) = with(act) {
         val dialog = android.app.Dialog(this, android.R.style.Theme_Material_Dialog_NoActionBar)
@@ -106,14 +146,14 @@ object Wishlist {
         }
         root.addView(View(this).apply { background = bg(C.CARD2, dp(2f)) }, lp(dp(36), dp(4), bottom = dp(14)).apply { gravity = Gravity.CENTER_HORIZONTAL })
         val head = hbox()
-        head.addView(text("Add to wishlist", 17f, C.TEXT, 2), lp(0, WRAP, 1f))
+        head.addView(text(addTitle, 17f, C.TEXT, 2), lp(0, WRAP, 1f))
         head.addView(text("✕", 16f, C.MUTED).apply { setPadding(dp(8), dp(4), dp(4), dp(4)); setOnClickListener { dialog.dismiss() } })
         root.addView(head, lp(bottom = dp(14)))
 
         val name = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
             imeOptions = EditorInfo.IME_ACTION_DONE
-            hint = "What do you need?"
+            hint = this@ItemList.hint
             textSize = 16f
             setTextColor(C.TEXT)
             setHintTextColor(C.DIM)
@@ -163,11 +203,11 @@ object Wishlist {
         name.requestFocus()
     }
 
-    /** "Ordered it?" confirmation — removes the item. */
+    /** "Ordered it?" / "Done with it?" confirmation — removes the item. */
     fun confirmOrdered(act: Activity, item: WishItem, onDismiss: (() -> Unit)? = null, onDone: (message: String) -> Unit) {
-        AlertDialog.Builder(act).setTitle("Ordered ${item.name}?")
-            .setMessage("It will be removed from your wishlist.")
-            .setPositiveButton("Ordered") { _, _ -> delete(act, item.id); onDone("${item.name} removed") }
+        AlertDialog.Builder(act).setTitle(doneTitle(item.name))
+            .setMessage(doneMessage)
+            .setPositiveButton(doneVerb) { _, _ -> delete(act, item.id); onDone("${item.name} removed") }
             .setNegativeButton("Cancel", null)
             .setOnDismissListener { onDismiss?.invoke() }
             .show()

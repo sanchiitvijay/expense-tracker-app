@@ -29,6 +29,7 @@ object Widgets {
         ChartWidget.update(ctx, m, m.getAppWidgetIds(ComponentName(ctx, ChartWidget::class.java)))
         PeopleWidget.update(ctx, m, m.getAppWidgetIds(ComponentName(ctx, PeopleWidget::class.java)))
         WishWidget.update(ctx, m, m.getAppWidgetIds(ComponentName(ctx, WishWidget::class.java)))
+        IdeaWidget.update(ctx, m, m.getAppWidgetIds(ComponentName(ctx, IdeaWidget::class.java)))
     }
 
     fun openApp(ctx: Context): PendingIntent =
@@ -342,6 +343,85 @@ class WishService : RemoteViewsService() {
         override fun onCreate() = Unit
         override fun onDestroy() = Unit
         override fun onDataSetChanged() { items = Wishlist.all(applicationContext) }
+        override fun getCount() = items.size
+        override fun getLoadingView(): RemoteViews? = null
+        override fun getViewTypeCount() = 1
+        override fun getItemId(position: Int) = position.toLong()
+        override fun hasStableIds() = false
+
+        override fun getViewAt(position: Int): RemoteViews {
+            val v = RemoteViews(packageName, R.layout.widget_row)
+            val w = items.getOrNull(position) ?: return v
+            v.setTextViewText(R.id.title, w.name)
+            v.setTextViewText(R.id.sub, (if (w.important) "Important · " else "") + "Added ${dayLabel(w.added)}")
+            v.setTextViewText(R.id.amt, if (w.important) "★" else "")
+            v.setTextColor(R.id.amt, C.AMBER)
+            v.setOnClickFillInIntent(R.id.row, Intent().putExtra("id", w.id))
+            return v
+        }
+    }
+}
+
+/**
+ * Popup over the home screen for the Ideas widget: "+ Add idea" adds; tapping a listed idea
+ * (extra "id") asks whether it's done and removes it.
+ */
+class IdeaActivity : Activity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val done: (String) -> Unit = { msg -> Toast.makeText(applicationContext, msg, Toast.LENGTH_SHORT).show() }
+        val item = intent.getStringExtra("id")?.let { id -> Ideas.all(this).firstOrNull { it.id == id } }
+        if (item != null) Ideas.confirmOrdered(this, item, onDismiss = { finish() }, onDone = done)
+        else Ideas.showAdd(this, onDismiss = { finish() }, onSaved = done)
+    }
+}
+
+/** Ideas (important first), tap one once done, "+ Add idea" to add. */
+class IdeaWidget : AppWidgetProvider() {
+    override fun onUpdate(ctx: Context, m: AppWidgetManager, ids: IntArray) = update(ctx, m, ids)
+
+    companion object {
+        fun update(ctx: Context, m: AppWidgetManager, ids: IntArray) {
+            if (ids.isEmpty()) return
+            val items = Ideas.all(ctx)
+            val important = items.count { it.important }
+            val v = RemoteViews(ctx.packageName, R.layout.widget_idea)
+            v.setTextViewText(R.id.count, "${items.size} idea${if (items.size == 1) "" else "s"}" + if (important > 0) " · $important ★" else "")
+            @Suppress("DEPRECATION")
+            v.setRemoteAdapter(R.id.list, Intent(ctx, IdeaService::class.java))
+            v.setEmptyView(R.id.list, R.id.empty)
+            v.setPendingIntentTemplate(
+                R.id.list,
+                PendingIntent.getActivity(
+                    ctx, 31,
+                    Intent(ctx, IdeaActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
+                    PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                ),
+            )
+            v.setOnClickPendingIntent(
+                R.id.add_item,
+                PendingIntent.getActivity(
+                    ctx, 30,
+                    Intent(ctx, IdeaActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                ),
+            )
+            v.setOnClickPendingIntent(R.id.header, Widgets.openApp(ctx))
+            m.updateAppWidget(ids, v)
+            @Suppress("DEPRECATION")
+            m.notifyAppWidgetViewDataChanged(ids, R.id.list)
+        }
+    }
+}
+
+/** Feeds the Ideas widget's list. */
+class IdeaService : RemoteViewsService() {
+    override fun onGetViewFactory(intent: Intent): RemoteViewsFactory = object : RemoteViewsFactory {
+        private var items = emptyList<WishItem>()
+
+        override fun onCreate() = Unit
+        override fun onDestroy() = Unit
+        override fun onDataSetChanged() { items = Ideas.all(applicationContext) }
         override fun getCount() = items.size
         override fun getLoadingView(): RemoteViews? = null
         override fun getViewTypeCount() = 1

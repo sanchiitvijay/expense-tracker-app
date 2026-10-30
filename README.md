@@ -15,9 +15,14 @@ Data is stored on the phone (`files/expenses.json`, app-private). No server, no 
   asked on first use) — nothing is sent anywhere
 - Wishlist tab (own file `files/wishlist.json`): note things you need to order, optionally tagged
   ★ Important (shown first). Tap ✓ Ordered once bought and it's removed
+- Ideas tab (own file `files/ideas.json`, off by default — turn it on in Settings): works like the
+  wishlist for ideas, ★ Important first, tap ✓ Done to remove one
+- Settings (⋮ → Settings & purge): show/hide any tab (hidden tabs keep all their data; a hidden
+  People tab also hides the People section in Reports), purge expenses (by months, date range or
+  all), clear People / Wishlist / Ideas, or erase everything
 - Reports also show a People section: you'll get / you owe / net, 6-month gave vs got, top
   balances both ways, this month's activity, oldest open balance and number of splits
-- ⋮ menu: Export JSON backup (expenses + People + Wishlist), Export CSV (expenses only), Import JSON/CSV, Purge data (by months or date range)
+- ⋮ menu: Export JSON backup (expenses + People + Wishlist + Ideas), Export CSV (expenses only), Import JSON/CSV, Settings & purge
 - Widgets:
   - **Quick add** (3×3, resizable): scrollable list of every entry from the last 7 days with the
     7-day net, plus `+ Spent` / `+ Got` buttons. Buttons add, tapping an entry edits it — both in a
@@ -26,6 +31,8 @@ Data is stored on the phone (`files/expenses.json`, app-private). No server, no 
     buttons; tapping a person adds an entry for them — all in a popup over the home screen
   - **Wishlist** (3×3, resizable): items to order, important first, with `+ Add item`; tap an item
     to mark it ordered — both in a popup over the home screen
+  - **Ideas** (3×3, resizable): your ideas, important first, with `+ Add idea`; tap an idea to mark
+    it done — both in a popup over the home screen
   - **Spending chart** (4×2, resizable): bar graph of net spend for the last 6 months (green when you received more than you spent)
 
 ## Data format (unchanged from the web app)
@@ -48,9 +55,10 @@ The release build is signed with your local debug key (fine for personal sideloa
 - `MainActivity.kt` — main screen, reports, menu, import/export/purge flows
 - `Ledger.kt` — People ledger model and its own local storage
 - `PeopleDialog.kt` — add/edit lend-borrow entry and Split bill sheets
-- `Wishlist.kt` — wishlist model, its own local storage, add sheet
+- `Wishlist.kt` — shared list model (`ItemList`) with its own local storage and add sheet; `Wishlist` and `Ideas` are two instances
+- `Settings.kt` — tab list and which tabs are shown
 - `Contacts.kt` — read-only contact name suggestions
 - `EntryDialog.kt` — add/edit bottom sheet (shared by app and widget popup)
-- `Widgets.kt` — Quick add + Spending chart widgets, widget popup activity
+- `Widgets.kt` — Quick add, Spending chart, People, Wishlist and Ideas widgets, widget popup activities
 - `Charts.kt` — canvas bar / donut / line charts
 - `Ui.kt` — colors, formatting, tiny view helpers

@@ -105,6 +105,14 @@ object Ledger {
         save(ctx)
     }
 
+    /** Removes every entry. Returns how many were removed. */
+    @Synchronized
+    fun clear(ctx: Context): Int {
+        val n = data(ctx).size
+        if (n > 0) { data(ctx).clear(); save(ctx) }
+        return n
+    }
+
     /** Adds entries whose id isn't already stored. Returns how many were added. */
     @Synchronized
     fun import(ctx: Context, list: List<Debt>): Int {

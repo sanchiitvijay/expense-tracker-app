@@ -3,4 +3,5 @@
     <string name="w_chart">Net spending for the last 6 months</string>
     <string name="w_people">Who owes you and whom you owe, with quick add and split</string>
     <string name="w_wish">Things you need to order, important ones first</string>
+    <string name="w_idea">Your ideas, important ones first, with quick add</string>
 </resources>
