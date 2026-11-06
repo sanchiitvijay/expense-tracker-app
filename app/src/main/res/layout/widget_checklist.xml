@@ -16,10 +16,11 @@
         android:paddingEnd="4dp">
 
         <TextView
+            android:id="@+id/label"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="Ideas"
+            android:text="Checklist"
             android:textColor="#8A8A8A"
             android:textSize="12sp" />
 
@@ -52,7 +53,7 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:gravity="center"
-            android:text="No ideas yet"
+            android:text="Nothing on this checklist"
             android:textColor="#5C5C5C"
             android:textSize="12sp" />
     </FrameLayout>
@@ -63,7 +64,7 @@
         android:layout_height="38dp"
         android:background="@drawable/pill_white"
         android:gravity="center"
-        android:text="+ Add idea"
+        android:text="+ Add"
         android:textColor="#0A0A0A"
         android:textSize="13sp"
         android:textStyle="bold" />

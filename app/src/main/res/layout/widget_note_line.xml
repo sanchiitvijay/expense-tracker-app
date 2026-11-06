@@ -1,0 +1,9 @@
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/line"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:lineSpacingMultiplier="1.15"
+    android:paddingStart="4dp"
+    android:paddingEnd="4dp"
+    android:textColor="#F5F5F5"
+    android:textSize="13sp" />

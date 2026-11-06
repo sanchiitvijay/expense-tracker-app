@@ -14,10 +14,11 @@ import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.HorizontalScrollView
 
-/** Bottom-sheet form to add a new entry, or edit/delete [existing]. Used by the app and the widget popup. */
+/** Bottom-sheet form to add a new entry to expense list [book], or edit/delete [existing]. Used by the app and the widget popup. */
 object EntryDialog {
     fun show(
         act: Activity,
+        book: String,
         existing: Expense?,
         initialType: String = "spent",
         onDismiss: (() -> Unit)? = null,
@@ -25,7 +26,7 @@ object EntryDialog {
     ) = with(act) {
         val dialog = Dialog(this, android.R.style.Theme_Material_Dialog_NoActionBar)
         var type = existing?.type ?: initialType
-        val cats = Store.categories(this)
+        val cats = Store.categories(this, book)
         var category = existing?.category ?: cats.first()
         var date = existing?.date?.let(::parseDate) ?: today()
         var refresh: () -> Unit = {}
@@ -39,7 +40,11 @@ object EntryDialog {
 
         // Title
         val head = hbox()
-        head.addView(text(if (existing == null) "New entry" else "Edit entry", 17f, C.TEXT, 2), lp(0, WRAP, 1f))
+        val heading = if (existing == null) "New entry" else "Edit entry"
+        val lists = Store.books.all(this)
+        head.addView(text(if (lists.size > 1) "$heading · ${Store.books.get(this, book).name}" else heading, 17f, C.TEXT, 2).apply {
+            maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
+        }, lp(0, WRAP, 1f))
         head.addView(text("✕", 16f, C.MUTED).apply { setPadding(dp(8), dp(4), dp(4), dp(4)); setOnClickListener { dialog.dismiss() } })
         root.addView(head, lp(bottom = dp(14)))
 
@@ -115,7 +120,7 @@ object EntryDialog {
                     AlertDialog.Builder(this@with).setTitle("Delete this entry?")
                         .setMessage("${existing.note.ifBlank { existing.category }.capFirst()} · ${money(existing.amount, false)}")
                         .setPositiveButton("Delete") { _, _ ->
-                            Store.delete(this@with, existing.id)
+                            Store.delete(this@with, book, existing.id)
                             onSaved("Entry deleted")
                             dialog.dismiss()
                         }
@@ -137,8 +142,8 @@ object EntryDialog {
                 return
             }
             val n = note.text.toString().trim().capFirst()
-            if (existing == null) Store.add(this, a, category, n, date.toString(), type)
-            else Store.update(this, existing.copy(amount = a, category = category, note = n, date = date.toString(), type = type))
+            if (existing == null) Store.add(this, book, a, category, n, date.toString(), type)
+            else Store.update(this, book, existing.copy(amount = a, category = category, note = n, date = date.toString(), type = type))
             onSaved(if (existing == null) "Added ${money(a, false)} · ${if (type == "received") "Received" else category}" else "Entry updated")
             dialog.dismiss()
         }

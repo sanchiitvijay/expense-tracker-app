@@ -7,9 +7,11 @@ import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
 import java.time.Instant
-import kotlin.random.Random
 
-/** Same schema as the web app: id, amount, category, note, date (YYYY-MM-DD), type (spent|received), createdAt (ISO). */
+/**
+ * Same schema as the web app: id, amount, category, note, date (YYYY-MM-DD), type (spent|received), createdAt (ISO).
+ * [list] is only set on records read from a full backup: the id of the expense list they came from.
+ */
 data class Expense(
     val id: String,
     val amount: Double,
@@ -18,6 +20,7 @@ data class Expense(
     val date: String,
     val type: String,
     val createdAt: String,
+    val list: String = "",
 ) {
     val received get() = type == "received"
     val month get() = date.take(7)
@@ -37,27 +40,32 @@ fun List<Expense>.totals(): Totals {
 /** Newest expense date first; same-day entries by creation time, newest first. */
 val EXPENSE_ORDER = compareByDescending<Expense> { it.date }.thenByDescending { it.createdAt }
 
-/** Local storage: one JSON file in app-private storage, in the same format as the export. */
+/**
+ * Local storage: one JSON file per expense list in app-private storage, in the same format as the export.
+ * The first list keeps the original `expenses.json`.
+ */
 object Store {
     private val DEFAULT_CATEGORIES = listOf("Food", "Transport", "Shopping", "Bills", "Entertainment", "Health", "Other")
-    private var items: MutableList<Expense>? = null
+    private val items = HashMap<String, MutableList<Expense>>()
 
-    private fun file(ctx: Context) = AtomicFile(File(ctx.filesDir, "expenses.json"))
+    val books = Books("expenses", "Main")
 
-    private fun data(ctx: Context): MutableList<Expense> {
-        items?.let { return it }
-        val f = file(ctx)
+    private fun file(ctx: Context, book: String) = AtomicFile(File(ctx.filesDir, books.fileName("expenses", book)))
+
+    private fun data(ctx: Context, book: String): MutableList<Expense> {
+        items[book]?.let { return it }
+        val f = file(ctx, book)
         val list = if (f.baseFile.exists()) {
-            runCatching { Backup.parse(String(f.readFully(), Charsets.UTF_8)).valid.map(::complete) }.getOrDefault(emptyList())
+            runCatching { Backup.parse(String(f.readFully(), Charsets.UTF_8)).valid.map { complete(it).copy(list = "") } }.getOrDefault(emptyList())
         } else emptyList()
-        return list.toMutableList().also { items = it }
+        return list.toMutableList().also { items[book] = it }
     }
 
-    private fun save(ctx: Context) {
-        val f = file(ctx)
+    private fun save(ctx: Context, book: String) {
+        val f = file(ctx, book)
         val out = f.startWrite()
         try {
-            out.write(Backup.toJson(data(ctx)).toByteArray(Charsets.UTF_8))
+            out.write(Backup.toJson(data(ctx, book)).toByteArray(Charsets.UTF_8))
             f.finishWrite(out)
         } catch (e: Exception) {
             f.failWrite(out)
@@ -66,70 +74,79 @@ object Store {
         Widgets.refresh(ctx)
     }
 
-    private fun newId(): String =
-        java.lang.Long.toHexString(System.currentTimeMillis()) + (1..8).map { "0123456789abcdef"[Random.nextInt(16)] }.joinToString("")
-
     private fun complete(e: Expense) = e.copy(
         id = e.id.ifBlank { newId() },
         createdAt = e.createdAt.ifBlank { Instant.now().toString() },
     )
 
     @Synchronized
-    fun all(ctx: Context): List<Expense> = data(ctx).sortedWith(EXPENSE_ORDER)
+    fun all(ctx: Context, book: String): List<Expense> = data(ctx, book).sortedWith(EXPENSE_ORDER)
+
+    /** Every entry in every list (for totals and erase-everything). */
+    fun everything(ctx: Context): List<Expense> = books.all(ctx).flatMap { all(ctx, it.id) }
 
     @Synchronized
-    fun categories(ctx: Context): List<String> {
-        val used = data(ctx).map { it.category }
+    fun categories(ctx: Context, book: String): List<String> {
+        val used = data(ctx, book).map { it.category }
         return (DEFAULT_CATEGORIES.dropLast(1) + used + "Other").distinct()
     }
 
     @Synchronized
-    fun add(ctx: Context, amount: Double, category: String, note: String, date: String, type: String): Expense {
+    fun add(ctx: Context, book: String, amount: Double, category: String, note: String, date: String, type: String): Expense {
         val e = complete(Expense("", amount, category, note, date, type, ""))
-        data(ctx).add(e)
-        save(ctx)
+        data(ctx, book).add(e)
+        save(ctx, book)
         return e
     }
 
     @Synchronized
-    fun update(ctx: Context, e: Expense) {
-        val list = data(ctx)
+    fun update(ctx: Context, book: String, e: Expense) {
+        val list = data(ctx, book)
         val i = list.indexOfFirst { it.id == e.id }
         if (i >= 0) list[i] = e
-        save(ctx)
+        save(ctx, book)
     }
 
     @Synchronized
-    fun delete(ctx: Context, id: String) {
-        data(ctx).removeAll { it.id == id }
-        save(ctx)
+    fun delete(ctx: Context, book: String, id: String) {
+        data(ctx, book).removeAll { it.id == id }
+        save(ctx, book)
     }
 
-    /** Remove every entry matching [predicate]. Returns how many were removed. */
+    /** Remove every entry of [book] matching [predicate]. Returns how many were removed. */
     @Synchronized
-    fun purge(ctx: Context, predicate: (Expense) -> Boolean): Int {
-        val list = data(ctx)
+    fun purge(ctx: Context, book: String, predicate: (Expense) -> Boolean): Int {
+        val list = data(ctx, book)
         val before = list.size
         list.removeAll(predicate)
         val removed = before - list.size
-        if (removed > 0) save(ctx)
+        if (removed > 0) save(ctx, book)
         return removed
     }
 
-    /** Adds entries whose id isn't already stored. Returns how many were added. */
+    /** Deletes a whole list and its file. */
     @Synchronized
-    fun import(ctx: Context, parsed: Backup.Parsed): Int {
-        val list = data(ctx)
+    fun deleteList(ctx: Context, book: String) {
+        books.remove(ctx, book)
+        items.remove(book)
+        file(ctx, book).delete()
+        Widgets.refresh(ctx)
+    }
+
+    /** Adds entries to [book] whose id isn't already stored there. Returns how many were added. */
+    @Synchronized
+    fun import(ctx: Context, book: String, records: List<Expense>): Int {
+        val list = data(ctx, book)
         val ids = list.mapTo(HashSet()) { it.id }
         var added = 0
-        for (e in parsed.valid) {
+        for (e in records) {
             if (e.id.isNotBlank() && e.id in ids) continue
-            val c = complete(e)
+            val c = complete(e).copy(list = "")
             list.add(c)
             ids.add(c.id)
             added++
         }
-        if (added > 0) save(ctx)
+        if (added > 0) save(ctx, book)
         return added
     }
 }
@@ -139,35 +156,64 @@ object Backup {
     private val COLUMNS = listOf("id", "date", "type", "category", "amount", "note", "createdAt")
     private val DATE = Regex("""\d{4}-\d{2}-\d{2}""")
 
-    /** [people], [wishlist] and [ideas] are only present in this app's full JSON backup. */
+    /**
+     * [people], [checklists], [notes] and the [lists] (names of the expense lists, checklists and notes, by id)
+     * are only present in this app's full JSON backup.
+     */
     class Parsed(
         val valid: List<Expense>, val invalid: Int, val people: List<Debt> = emptyList(),
-        val wishlist: List<WishItem> = emptyList(), val ideas: List<WishItem> = emptyList(),
+        val checklists: List<CheckItem> = emptyList(), val notes: List<NoteEntry> = emptyList(),
+        val lists: Lists = Lists(),
     )
+
+    class Lists(val expenses: List<Book> = emptyList(), val checklists: List<Book> = emptyList(), val notes: List<Book> = emptyList())
+
+    /** A note from a backup: the id of the note ([list]) and its text. */
+    class NoteEntry(val list: String, val note: NoteText)
 
     private fun num(d: Double) = if (d % 1.0 == 0.0) d.toLong().toString() else d.toString()
 
-    /** Export file: expenses (same format as before) plus the People ledger, the wishlist and ideas. */
-    fun toFullJson(list: List<Expense>, people: List<Debt>, wishlist: List<WishItem>, ideas: List<WishItem>): String =
-        JSONObject(toJson(list)).put("people", Ledger.toArray(people)).put("wishlist", Wishlist.toArray(wishlist))
-            .put("ideas", Ideas.toArray(ideas)).toString(2)
-
-    fun toJson(list: List<Expense>): String {
+    /**
+     * Export file: every expense list (same format as before, each entry tagged with its "list" id), plus the
+     * People ledger, every checklist item (tagged the same way), every note, and the names of all lists.
+     */
+    fun toFullJson(
+        expenses: Map<Book, List<Expense>>, people: List<Debt>,
+        checklists: Map<Book, List<CheckItem>>, notes: Map<Book, NoteText>,
+    ): String {
         val arr = JSONArray()
-        for (e in list.sortedWith(EXPENSE_ORDER)) {
-            arr.put(
-                JSONObject().put("id", e.id).put("date", e.date).put("type", e.type).put("category", e.category)
-                    .put("amount", e.amount).put("note", e.note).put("createdAt", e.createdAt)
-            )
-        }
-        return JSONObject()
-            .put("format", "expenses-tracker")
-            .put("version", 1)
-            .put("exportedAt", Instant.now().toString())
-            .put("count", list.size)
-            .put("expenses", arr)
+        for ((b, list) in expenses) for (e in list.sortedWith(EXPENSE_ORDER)) arr.put(record(e).put("list", b.id))
+        val items = JSONArray()
+        for ((b, list) in checklists) { val a = Checklists.toArray(list, b.id); for (i in 0 until a.length()) items.put(a.get(i)) }
+        val texts = JSONArray()
+        for ((b, n) in notes) texts.put(n.toJson().put("list", b.id))
+        return header(expenses.values.sumOf { it.size }).put("expenses", arr)
+            .put("people", Ledger.toArray(people))
+            .put("checklists", items)
+            .put("textNotes", texts)
+            .put("lists", JSONObject()
+                .put("expenses", Store.books.toArray(expenses.keys.toList()))
+                .put("checklists", Checklists.books.toArray(checklists.keys.toList()))
+                .put("textNotes", Notes.books.toArray(notes.keys.toList())))
             .toString(2)
     }
+
+    /** One expense list, as stored on the phone and in the CSV-era backups. */
+    fun toJson(list: List<Expense>): String {
+        val arr = JSONArray()
+        for (e in list.sortedWith(EXPENSE_ORDER)) arr.put(record(e))
+        return header(list.size).put("expenses", arr).toString(2)
+    }
+
+    private fun header(count: Int) = JSONObject()
+        .put("format", "expenses-tracker")
+        .put("version", 1)
+        .put("exportedAt", Instant.now().toString())
+        .put("count", count)
+
+    private fun record(e: Expense) =
+        JSONObject().put("id", e.id).put("date", e.date).put("type", e.type).put("category", e.category)
+            .put("amount", e.amount).put("note", e.note).put("createdAt", e.createdAt)
 
     private fun cell(s: String) =
         if (s.any { it == '"' || it == ',' || it == '\n' || it == '\r' }) "\"" + s.replace("\"", "\"\"") + "\"" else s
@@ -184,18 +230,34 @@ object Backup {
     fun parse(raw: String): Parsed {
         val text = raw.removePrefix("\uFEFF").trim()
         var people = emptyList<Debt>()
-        var wishlist = emptyList<WishItem>()
-        var ideas = emptyList<WishItem>()
+        var checklists = emptyList<CheckItem>()
+        var notes = emptyList<NoteEntry>()
+        var lists = Lists()
         val records = try {
             when {
                 text.startsWith("[") -> jsonRecords(JSONArray(text))
                 text.startsWith("{") -> {
                     val o = JSONObject(text)
                     people = o.optJSONArray("people")?.let(Ledger::fromArray).orEmpty()
-                    wishlist = o.optJSONArray("wishlist")?.let(Wishlist::fromArray).orEmpty()
-                    ideas = o.optJSONArray("ideas")?.let(Ideas::fromArray).orEmpty()
+                    val l = o.optJSONObject("lists") ?: JSONObject()
+                    fun books(key: String, b: Books) = l.optJSONArray(key)?.let(b::fromArray).orEmpty()
+                    val checkBooks = books("checklists", Checklists.books).toMutableList()
+                    checklists = o.optJSONArray("checklists")?.let(Checklists::fromArray).orEmpty()
+                    // Older backups: their wishlists and Ideas lists (saved as "ideas", later as "notes") become
+                    // checklists, with the same ids they get on a phone that was updated
+                    for ((prefix, key, listKey, name) in listOf(listOf("w", "wishlist", "wishlist", "Wishlist"), listOf("i", "ideas", "notes", "Ideas"))) {
+                        val arr = o.optJSONArray(key) ?: o.optJSONArray(listKey).takeIf { key == "ideas" } ?: continue
+                        val old = Checklists.fromArray(arr).map { it.copy(list = Checklists.oldId(prefix, it.list)) }
+                        checklists = checklists + old
+                        checkBooks += books(listKey, Checklists.books).map { Book(Checklists.oldId(prefix, it.id), it.name) }
+                        for (id in old.map { it.list }.distinct()) if (checkBooks.none { it.id == id }) checkBooks += Book(id, name)
+                    }
+                    notes = o.optJSONArray("textNotes")?.let { arr ->
+                        (0 until arr.length()).mapNotNull { i -> arr.optJSONObject(i)?.let { NoteEntry(it.optString("list"), NoteText.fromJson(it)) } }
+                    }.orEmpty()
+                    lists = Lists(books("expenses", Store.books), checkBooks, books("textNotes", Notes.books))
                     val ex = o.optJSONArray("expenses")
-                    if (ex == null && !o.has("people") && !o.has("wishlist") && !o.has("ideas")) throw IllegalArgumentException("No expenses found in this file.")
+                    if (ex == null && people.isEmpty() && checklists.isEmpty() && notes.isEmpty()) throw IllegalArgumentException("No expenses found in this file.")
                     jsonRecords(ex ?: JSONArray())
                 }
                 else -> csvRecords(text)
@@ -206,7 +268,7 @@ object Backup {
         val valid = ArrayList<Expense>()
         var invalid = 0
         for (r in records) normalise(r)?.let { valid.add(it) } ?: invalid++
-        return Parsed(valid, invalid, people, wishlist, ideas)
+        return Parsed(valid, invalid, people, checklists, notes, lists)
     }
 
     private fun jsonRecords(arr: JSONArray): List<Map<String, Any?>> = (0 until arr.length()).map { i ->
@@ -258,6 +320,7 @@ object Backup {
             date = date,
             type = if (str("type").lowercase() == "received") "received" else "spent",
             createdAt = str("createdAt", "\$createdAt"),
+            list = str("list"),
         )
     }
 }

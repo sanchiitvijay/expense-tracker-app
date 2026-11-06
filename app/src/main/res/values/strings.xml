@@ -1,7 +1,7 @@
 <resources>
-    <string name="w_add">Last 7 days of entries, and add without opening the app</string>
-    <string name="w_chart">Net spending for the last 6 months</string>
+    <string name="w_add">Last 7 days of one expense list, and add without opening the app</string>
+    <string name="w_chart">Net spending of one expense list for the last 6 months</string>
     <string name="w_people">Who owes you and whom you owe, with quick add and split</string>
-    <string name="w_wish">Things you need to order, important ones first</string>
-    <string name="w_idea">Your ideas, important ones first, with quick add</string>
+    <string name="w_checklist">One checklist: tap an item to tick it off, with quick add</string>
+    <string name="w_note">One note\'s text, with bold; tap to edit</string>
 </resources>

@@ -5,10 +5,14 @@ import android.app.AlertDialog
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.text.InputType
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
+import android.view.WindowManager
+import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.ScrollView
@@ -63,8 +67,8 @@ class MainActivity : Activity() {
             setOnClickListener {
                 when (tab) {
                     Tab.PEOPLE -> openDebt(null, "gave")
-                    Tab.WISHLIST -> Wishlist.showAdd(this@MainActivity) { msg -> toast(msg); render() }
-                    Tab.IDEAS -> Ideas.showAdd(this@MainActivity) { msg -> toast(msg); render() }
+                    Tab.CHECKLISTS -> Checklists.showAdd(this@MainActivity, Checklists.books.current(this@MainActivity).id) { msg -> toast(msg); render() }
+                    Tab.NOTES -> Unit // hidden: the note is edited in place
                     else -> openForm(null)
                 }
             }
@@ -81,6 +85,28 @@ class MainActivity : Activity() {
             insets
         }
         setContentView(root)
+        openFrom(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        openFrom(intent)
+    }
+
+    /** A list widget's header opens the app on that widget's tab and list. */
+    private fun openFrom(i: Intent?) {
+        val t = i?.getStringExtra("tab")?.let { n -> Tab.entries.firstOrNull { it.name == n } } ?: return
+        tab = t
+        settingsOpen = false
+        openPerson = null
+        i.getStringExtra("list")?.let { id -> sectionOf(t)?.books?.select(this, id) }
+        i.removeExtra("tab")
+    }
+
+    override fun onPause() {
+        super.onPause()
+        noteFlush?.invoke()
     }
 
     override fun onResume() {
@@ -91,7 +117,10 @@ class MainActivity : Activity() {
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 
-    private fun openForm(e: Expense?) = EntryDialog.show(this, e) { msg -> toast(msg); render() }
+    /** The expense list open now (Expenses and Reports tabs). */
+    private fun book() = Store.books.current(this).id
+
+    private fun openForm(e: Expense?) = EntryDialog.show(this, book(), e) { msg -> toast(msg); render() }
 
     private fun openDebt(d: Debt?, type: String) =
         PeopleDialog.show(this, d, type, person = openPersonName()) { msg -> toast(msg); render() }
@@ -107,7 +136,7 @@ class MainActivity : Activity() {
         seg.removeAllViews()
         for (t in visible) {
             val active = t == tab && !settingsOpen
-            seg.addView(text(t.label, if (visible.size > 4) 12f else 13f, if (active) C.TEXT else C.MUTED, 1).apply {
+            seg.addView(text(t.label, if (visible.size > 4) 11.5f else 13f, if (active) C.TEXT else C.MUTED, 1).apply {
                 gravity = Gravity.CENTER
                 maxLines = 1
                 setPadding(0, dp(7), 0, dp(7))
@@ -116,16 +145,106 @@ class MainActivity : Activity() {
             }, lp(0, WRAP, 1f))
         }
         title.text = if (settingsOpen) "Settings" else tab.label
-        fab.visibility = if (settingsOpen) View.GONE else View.VISIBLE
+        fab.visibility = if (settingsOpen || tab == Tab.NOTES) View.GONE else View.VISIBLE
+        noteFlush?.invoke() // the open note's editor is about to go
+        noteFlush = null
         content.removeAllViews()
+        if (!settingsOpen) sectionOf(tab)?.let { content.addView(listBar(it), lp(bottom = dp(14))) }
         if (settingsOpen) renderSettings() else when (tab) {
-            Tab.EXPENSES -> renderExpenses(Store.all(this))
+            Tab.EXPENSES -> renderExpenses(Store.all(this, book()))
             Tab.PEOPLE -> renderPeople()
-            Tab.WISHLIST -> renderList(Wishlist)
-            Tab.IDEAS -> renderList(Ideas)
-            Tab.REPORTS -> renderReports(Store.all(this))
+            Tab.CHECKLISTS -> renderChecklist()
+            Tab.NOTES -> renderNote()
+            Tab.REPORTS -> renderReports(Store.all(this, book()))
         }
         syncBack()
+    }
+
+    // ── Lists: separate expense lists, checklists and notes; each can be shown by its own widget ──
+    /** [contents] describes what a list holds ("12 entries", "the text"), or null when it's empty. */
+    private class Section(val books: Books, val noun: String, val contents: (String) -> String?, val delete: (String) -> Unit)
+
+    private val expenseSection by lazy {
+        Section(Store.books, "list", { id -> Store.all(this, id).size.takeIf { it > 0 }?.let { plural(it, "entry", "entries") } }, { Store.deleteList(this, it) })
+    }
+    private val checkSection by lazy {
+        Section(Checklists.books, "checklist", { id -> Checklists.all(this, id).size.takeIf { it > 0 }?.let { plural(it, "item") } }, { Checklists.deleteList(this, it) })
+    }
+    private val noteSection by lazy {
+        Section(Notes.books, "note", { id -> if (Notes.get(this, id).isBlank) null else "the text" }, { Notes.deleteNote(this, it) })
+    }
+
+    private fun sectionOf(t: Tab) = when (t) {
+        Tab.EXPENSES, Tab.REPORTS -> expenseSection
+        Tab.CHECKLISTS -> checkSection
+        Tab.NOTES -> noteSection
+        Tab.PEOPLE -> null
+    }
+
+    /** Chips to switch list, "+ New". Tap the open list (or long-press any) to rename or delete it. */
+    private fun listBar(s: Section): View {
+        val cur = s.books.current(this)
+        val row = hbox()
+        for (b in s.books.all(this)) {
+            val active = b.id == cur.id
+            row.addView(chip(b.name).apply {
+                styleChip(this, active)
+                setOnClickListener { if (active) listMenu(s, b) else { s.books.select(this@MainActivity, b.id); render() } }
+                setOnLongClickListener { listMenu(s, b); true }
+            }, lp(WRAP, WRAP, end = dp(8)))
+        }
+        row.addView(chip("+ New ${s.noun}").apply {
+            styleChip(this, false)
+            setOnClickListener {
+                askName("New ${s.noun}", "") { name ->
+                    val b = s.books.create(this@MainActivity, name)
+                    s.books.select(this@MainActivity, b.id)
+                    toast("${b.name} created — add a widget to show it on your home screen")
+                    render()
+                }
+            }
+        })
+        return HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(row) }
+    }
+
+    private fun listMenu(s: Section, b: Book) {
+        AlertDialog.Builder(this).setTitle(b.name)
+            .setItems(arrayOf("Rename", "Delete ${s.noun}")) { _, w ->
+                if (w == 0) askName("Rename ${s.noun}", b.name) { name -> s.books.rename(this, b.id, name); render() }
+                else if (s.books.all(this).size == 1) toast("Keep at least one ${s.noun} — purge it in Settings to empty it")
+                else {
+                    val what = s.contents(b.id)
+                    AlertDialog.Builder(this).setTitle("Delete ${b.name}?")
+                        .setMessage("Permanently removes this ${s.noun}${what?.let { " and $it" } ?: ""}. Widgets showing it switch to ${s.books.all(this).first { it.id != b.id }.name}.\n\nExport a backup first if you might need it.")
+                        .setPositiveButton("Delete") { _, _ -> s.delete(b.id); toast("${b.name} deleted"); render() }
+                        .setNeutralButton("Export first") { _, _ -> export(true) }
+                        .setNegativeButton("Cancel", null).show()
+                }
+            }
+            .show()
+    }
+
+    private fun askName(title: String, initial: String, onOk: (String) -> Unit) {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            hint = "Name"
+            setText(initial)
+            setSelection(text.length)
+            setTextColor(C.TEXT)
+            setHintTextColor(C.DIM)
+        }
+        val box = FrameLayout(this).apply { setPadding(dp(22), dp(8), dp(22), 0); addView(input) }
+        val d = AlertDialog.Builder(this).setTitle(title).setView(box)
+            .setPositiveButton("Save", null).setNegativeButton("Cancel", null).create()
+        d.setOnShowListener {
+            d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val n = input.text.toString().trim()
+                if (n.isEmpty()) input.error = "Enter a name" else { onOk(n); d.dismiss() }
+            }
+        }
+        d.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+        d.show()
+        input.requestFocus()
     }
 
     // ── Back from Settings, or from a person's page to the People list ──
@@ -349,46 +468,78 @@ class MainActivity : Activity() {
         else -> "You owe"
     }
 
-    // ── Wishlist / Ideas tabs (removed from the list once done) ──
-    private fun renderList(store: ItemList) {
-        val items = store.all(this)
-        val important = items.count { it.important }
+    // ── Checklist tab: tap to tick off; ticked items stay, struck through, until cleared ──
+    private fun renderChecklist() {
+        val book = Checklists.books.current(this)
+        val items = Checklists.all(this, book.id)
+        val (done, open) = items.partition { it.done }
         val hero = vbox().apply { background = bg(C.CARD, dp(22f), dp(1), C.LINE); setPadding(dp(18), dp(16), dp(18), dp(18)) }
-        hero.addView(caps(store.heading))
-        hero.addView(text("${items.size} item${if (items.size == 1) "" else "s"}", 30f, C.TEXT, 2), lp(top = dp(4)))
-        hero.addView(text(if (important > 0) "$important marked important" else "Nothing marked important", 12f, if (important > 0) C.AMBER else C.DIM))
+        hero.addView(caps(book.name))
+        hero.addView(text(when {
+            items.isEmpty() -> "Empty"
+            open.isEmpty() -> "All done"
+            else -> "${open.size} to do"
+        }, 30f, if (items.isNotEmpty() && open.isEmpty()) C.GREEN else C.TEXT, 2), lp(top = dp(4)))
+        hero.addView(text(if (items.isEmpty()) "Tap + Add to add an item" else "${done.size} of ${items.size} done", 12f, C.DIM))
         content.addView(hero, lp(bottom = dp(24)))
 
         if (items.isEmpty()) {
-            content.addView(empty(store.emptyText))
+            content.addView(empty("Nothing on this checklist yet.\nKeep separate checklists for shopping, packing, to-dos…"))
             return
         }
-        val (imp, rest) = items.partition { it.important }
-        for ((label, list) in listOf("Important" to imp, "Others" to rest)) {
-            if (list.isEmpty()) continue
-            content.addView(text(label, 15f, if (label == "Important") C.AMBER else C.TEXT, 2), lp(bottom = dp(10)))
-            content.addView(card().apply { list.forEach { addView(itemRow(store, it)) } }, lp(bottom = dp(18)))
+        if (open.isNotEmpty()) content.addView(card().apply { open.forEach { addView(checkRow(book.id, it)) } }, lp(bottom = dp(18)))
+        if (done.isNotEmpty()) {
+            val h = hbox()
+            h.addView(text("Done", 15f, C.MUTED, 2), lp(0, WRAP, 1f))
+            h.addView(text("Clear done", 12.5f, C.RED, 2).apply {
+                setPadding(dp(12), dp(6), dp(12), dp(6))
+                background = pressable(bg(withAlpha(C.RED, 0x1F), dp(10f)))
+                setOnClickListener { toast("Cleared ${plural(Checklists.clearDone(this@MainActivity, book.id), "item")}"); render() }
+            })
+            content.addView(h, lp(bottom = dp(10)))
+            content.addView(card().apply { done.forEach { addView(checkRow(book.id, it)) } }, lp(bottom = dp(18)))
         }
-        content.addView(text(store.footer, 11.5f, C.DIM).apply { gravity = Gravity.CENTER })
+        content.addView(text("Tap an item to tick it off · long-press to edit or delete", 11.5f, C.DIM).apply { gravity = Gravity.CENTER })
     }
 
-    private fun itemRow(store: ItemList, w: WishItem): View {
-        val r = hbox().apply { setPadding(dp(16), dp(10), dp(12), dp(10)) }
-        val color = if (w.important) C.AMBER else C.MUTED
-        r.addView(text(if (w.important) "★" else "•", 15f, color, 2).apply {
+    private fun checkRow(list: String, w: CheckItem): View {
+        val r = hbox().apply {
+            setPadding(dp(16), dp(11), dp(14), dp(11))
+            background = pressable()
+            setOnClickListener { Checklists.toggle(this@MainActivity, list, w.id); render() }
+            setOnLongClickListener { itemMenu(list, w); true }
+        }
+        r.addView(text(if (w.done) "✓" else "", 14f, C.GREEN, 2).apply {
             gravity = Gravity.CENTER
-            background = bg(withAlpha(color, 0x1F), dp(12f))
-        }, lp(dp(36), dp(36), end = dp(12)))
-        val mid = vbox()
-        mid.addView(text(w.name, 14.5f, C.TEXT, 1).apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.END })
-        mid.addView(text("Added ${dayLabel(w.added)}", 11f, C.DIM), lp(WRAP, WRAP, top = dp(2)))
-        r.addView(mid, lp(0, WRAP, 1f))
-        r.addView(text(store.doneButton, 12.5f, C.GREEN, 2).apply {
-            setPadding(dp(12), dp(8), dp(12), dp(8))
-            background = pressable(bg(withAlpha(C.GREEN, 0x1F), dp(10f)))
-            setOnClickListener { store.confirmOrdered(this@MainActivity, w) { msg -> toast(msg); render() } }
-        }, lp(WRAP, WRAP, start = dp(8)))
+            background = if (w.done) bg(withAlpha(C.GREEN, 0x2E), dp(12f)) else bg(0, dp(12f), dp(2), C.DIM)
+        }, lp(dp(24), dp(24), end = dp(14)))
+        r.addView(text(if (w.done) struck(w.name) else w.name, 14.5f, if (w.done) C.DIM else C.TEXT, 1).apply {
+            maxLines = 3; ellipsize = TextUtils.TruncateAt.END
+        }, lp(0, WRAP, 1f))
+        if (w.important && !w.done) r.addView(text("★", 14f, C.AMBER, 2), lp(WRAP, WRAP, start = dp(8)))
         return r
+    }
+
+    private fun itemMenu(list: String, w: CheckItem) {
+        AlertDialog.Builder(this).setTitle(w.name)
+            .setItems(arrayOf("Edit", if (w.important) "Unmark important" else "Mark important", "Delete")) { _, i ->
+                when (i) {
+                    0 -> askName("Edit item", w.name) { n -> Checklists.rename(this, list, w.id, n); render() }
+                    1 -> { Checklists.setImportant(this, list, w.id, !w.important); render() }
+                    else -> { Checklists.delete(this, list, w.id); toast("${w.name} deleted"); render() }
+                }
+            }
+            .show()
+    }
+
+    // ── Notes tab: the open note, edited in place and saved as you type ──
+    private var noteFlush: (() -> Unit)? = null
+
+    private fun renderNote() {
+        val editor = NoteEditor.build(this, Notes.books.current(this).id, minLines = 14)
+        noteFlush = editor.flush
+        content.addView(editor.view)
+        content.addView(text("Saved as you type · add a Note widget to keep it on your home screen", 11.5f, C.DIM).apply { gravity = Gravity.CENTER }, lp(top = dp(12)))
     }
 
     // ── Expenses tab ──
@@ -449,7 +600,7 @@ class MainActivity : Activity() {
     private fun confirmDelete(e: Expense) {
         AlertDialog.Builder(this).setTitle("Delete this entry?")
             .setMessage("${e.note.ifBlank { e.category }.capFirst()} · ${money(e.amount, false)} · ${dayLabel(e.date)}")
-            .setPositiveButton("Delete") { _, _ -> Store.delete(this, e.id); toast("Entry deleted"); render() }
+            .setPositiveButton("Delete") { _, _ -> Store.delete(this, book(), e.id); toast("Entry deleted"); render() }
             .setNegativeButton("Cancel", null).show()
     }
 
@@ -718,11 +869,21 @@ class MainActivity : Activity() {
 
         content.addView(text("Purge data", 15f, C.TEXT, 2), lp(bottom = dp(2)))
         content.addView(text("Permanently deletes data, including from hidden tabs. Export a backup first if you might need it.", 12f, C.MUTED), lp(bottom = dp(10)))
+        content.addView(text("Expenses, Checklist and Notes purge the list that's open on their tab.", 12f, C.MUTED), lp(bottom = dp(10)))
         content.addView(card().apply {
-            addView(settingRow("Expenses", summary(Tab.EXPENSES), "Purge…", C.RED) { purgeMenu() })
+            val ex = Store.books.current(this@MainActivity)
+            val check = Checklists.books.current(this@MainActivity)
+            val note = Notes.books.current(this@MainActivity)
+            addView(settingRow("Expenses · ${ex.name}", expenseSection.contents(ex.id) ?: "Empty", "Purge…", C.RED) { purgeMenu() })
             addView(settingRow("People", summary(Tab.PEOPLE), "Purge…", C.RED) { wipe("all people entries", Ledger.all(this@MainActivity).size) { Ledger.clear(this@MainActivity) } })
-            addView(settingRow("Wishlist", summary(Tab.WISHLIST), "Purge…", C.RED) { wipe("the wishlist", Wishlist.all(this@MainActivity).size) { Wishlist.clear(this@MainActivity) } })
-            addView(settingRow("Ideas", summary(Tab.IDEAS), "Purge…", C.RED) { wipe("all ideas", Ideas.all(this@MainActivity).size) { Ideas.clear(this@MainActivity) } })
+            addView(settingRow("Checklist · ${check.name}", checkSection.contents(check.id) ?: "Empty", "Purge…", C.RED) {
+                wipe("everything in ${check.name}", Checklists.all(this@MainActivity, check.id).size, { plural(it, "item") }) { Checklists.clear(this@MainActivity, check.id) }
+            })
+            addView(settingRow("Note · ${note.name}", noteSection.contents(note.id) ?: "Empty", "Purge…", C.RED) {
+                wipe("the text of ${note.name}", if (Notes.get(this@MainActivity, note.id).isBlank) 0 else 1, { "its text" }) {
+                    if (Notes.clear(this@MainActivity, note.id)) 1 else 0
+                }
+            })
         }, lp(bottom = dp(14)))
 
         content.addView(text("Erase everything", 13.5f, C.RED, 2).apply {
@@ -736,10 +897,10 @@ class MainActivity : Activity() {
     private fun plural(n: Int, one: String, many: String = one + "s") = "$n ${if (n == 1) one else many}"
 
     private fun summary(t: Tab): String = when (t) {
-        Tab.EXPENSES -> plural(Store.all(this).size, "entry", "entries")
+        Tab.EXPENSES -> "${plural(Store.everything(this).size, "entry", "entries")} · ${plural(Store.books.all(this).size, "list")}"
         Tab.PEOPLE -> "${plural(Ledger.all(this).size, "entry", "entries")} · ${plural(Ledger.people(this).size, "person", "people")}"
-        Tab.WISHLIST -> plural(Wishlist.all(this).size, "item")
-        Tab.IDEAS -> plural(Ideas.all(this).size, "idea")
+        Tab.CHECKLISTS -> "${plural(Checklists.everything(this).size, "item")} · ${plural(Checklists.books.all(this).size, "checklist")}"
+        Tab.NOTES -> plural(Notes.books.all(this).size, "note")
         Tab.REPORTS -> "Charts from your expenses and people"
     }
 
@@ -770,28 +931,31 @@ class MainActivity : Activity() {
         render()
     }
 
-    /** Confirms, then deletes a whole section via [action] (which returns how many were removed). */
-    private fun wipe(what: String, n: Int, action: () -> Int) {
+    /** Confirms, then deletes a whole section via [action] (which returns how many were removed, described by [unit]). */
+    private fun wipe(what: String, n: Int, unit: (Int) -> String = { plural(it, "entry", "entries") }, action: () -> Int) {
         if (n == 0) { toast("Nothing to purge"); return }
         AlertDialog.Builder(this).setTitle("Delete ${what}?")
-            .setMessage("This permanently removes $n ${if (n == 1) "entry" else "entries"}.\n\nExport a backup first if you might need them later.")
-            .setPositiveButton("Purge") { _, _ -> toast("Purged ${action()} ${if (n == 1) "entry" else "entries"}"); render() }
+            .setMessage("This permanently removes ${unit(n)}.\n\nExport a backup first if you might need it later.")
+            .setPositiveButton("Purge") { _, _ -> toast("Purged ${unit(action())}"); render() }
             .setNeutralButton("Export first") { _, _ -> export(true) }
             .setNegativeButton("Cancel", null).show()
     }
 
     private fun eraseAll() {
-        val e = Store.all(this).size
+        val e = Store.everything(this).size
         val d = Ledger.all(this).size
-        val w = Wishlist.all(this).size
-        val i = Ideas.all(this).size
+        val w = Checklists.everything(this).size
+        val i = Notes.books.all(this).count { !Notes.get(this, it.id).isBlank }
         if (e + d + w + i == 0) { toast("Nothing to purge"); return }
         AlertDialog.Builder(this).setTitle("Erase everything?")
-            .setMessage("Permanently deletes ${plural(e, "expense")}, ${plural(d, "people entry", "people entries")}, ${plural(w, "wishlist item")} and ${plural(i, "idea")}.\n\nTab settings are kept. Export a backup first if you might need any of it.")
+            .setMessage("Permanently deletes ${plural(e, "expense")}, ${plural(d, "people entry", "people entries")}, ${plural(w, "checklist item")} and the text of ${plural(i, "note")}, in every list.\n\nYour lists (now empty) and tab settings are kept. Export a backup first if you might need any of it.")
             .setPositiveButton("Erase") { _, _ ->
                 AlertDialog.Builder(this).setTitle("Are you sure?").setMessage("This cannot be undone.")
                     .setPositiveButton("Erase everything") { _, _ ->
-                        Store.purge(this) { true }; Ledger.clear(this); Wishlist.clear(this); Ideas.clear(this)
+                        Store.books.all(this).forEach { Store.purge(this, it.id) { true } }
+                        Ledger.clear(this)
+                        Checklists.books.all(this).forEach { Checklists.clear(this, it.id) }
+                        Notes.books.all(this).forEach { Notes.clear(this, it.id) }
                         openPerson = null
                         toast("All data erased")
                         render()
@@ -825,8 +989,9 @@ class MainActivity : Activity() {
     }
 
     private fun export(json: Boolean) {
-        val nothing = Store.all(this).isEmpty() && (!json || (Ledger.all(this).isEmpty() && Wishlist.all(this).isEmpty() && Ideas.all(this).isEmpty()))
-        if (nothing) { toast(if (json) "Nothing to export" else "No expenses to export (People, Wishlist and Ideas are in the JSON backup)"); return }
+        val nothing = if (json) Store.everything(this).isEmpty() && Ledger.all(this).isEmpty() && Checklists.everything(this).isEmpty() && Notes.books.all(this).all { Notes.get(this, it.id).isBlank }
+        else Store.all(this, book()).isEmpty()
+        if (nothing) { toast(if (json) "Nothing to export" else "No entries in ${Store.books.current(this).name} (the CSV has the open expense list; everything else is in the JSON backup)"); return }
         val ext = if (json) "json" else "csv"
         startActivityForResult(
             Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
@@ -842,15 +1007,19 @@ class MainActivity : Activity() {
         if (resultCode != RESULT_OK || uri == null) return
         try {
             when (requestCode) {
-                REQ_EXPORT_JSON, REQ_EXPORT_CSV -> {
-                    val list = Store.all(this)
-                    val json = requestCode == REQ_EXPORT_JSON
+                REQ_EXPORT_JSON -> {
+                    val expenses = Store.books.all(this).associateWith { Store.all(this, it.id) }
                     val people = Ledger.all(this)
-                    val wish = Wishlist.all(this)
-                    val ideas = Ideas.all(this)
-                    val out = if (json) Backup.toFullJson(list, people, wish, ideas) else Backup.toCsv(list)
+                    val checks = Checklists.books.all(this).associateWith { Checklists.all(this, it.id) }
+                    val notes = Notes.books.all(this).associateWith { Notes.get(this, it.id) }
+                    val out = Backup.toFullJson(expenses, people, checks, notes)
                     contentResolver.openOutputStream(uri, "wt")!!.use { it.write(out.toByteArray(Charsets.UTF_8)) }
-                    toast(if (json) "Exported ${list.size} expenses, ${people.size} people entries, ${wish.size} wishlist items, ${ideas.size} ideas" else "Exported ${list.size} entries")
+                    toast("Exported ${expenses.values.sumOf { it.size }} expenses, ${people.size} people entries, ${checks.values.sumOf { it.size }} checklist items, ${plural(notes.size, "note")}")
+                }
+                REQ_EXPORT_CSV -> {
+                    val list = Store.all(this, book())
+                    contentResolver.openOutputStream(uri, "wt")!!.use { it.write(Backup.toCsv(list).toByteArray(Charsets.UTF_8)) }
+                    toast("Exported ${list.size} entries from ${Store.books.current(this).name}")
                 }
                 REQ_IMPORT -> {
                     val txt = contentResolver.openInputStream(uri)!!.use { it.readBytes().toString(Charsets.UTF_8) }
@@ -862,29 +1031,62 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * One section of an import, grouped by the list each record goes to: the list it came from in the backup
+     * (added here if missing), otherwise — older backups, CSV — the list open now.
+     */
+    private inner class Incoming<T>(
+        val books: Books, records: List<T>, listId: (T) -> String, known: List<Book>, id: (T) -> String,
+        existingIds: (String) -> Set<String>, private val add: (String, List<T>) -> Int,
+    ) {
+        private val ctx = this@MainActivity
+        val total = records.size
+        val routes: Map<Book, List<T>> = records.groupBy { r ->
+            known.firstOrNull { it.id == listId(r) }?.let { b -> if (books.has(ctx, b.id)) books.get(ctx, b.id) else b } ?: books.current(ctx)
+        }
+        val fresh = routes.entries.sumOf { (b, list) ->
+            val ids = if (books.has(ctx, b.id)) existingIds(b.id) else emptySet()
+            list.count { id(it).isBlank() || id(it) !in ids }
+        }
+        val newLists = routes.keys.count { !books.has(ctx, it.id) }
+
+        fun line(label: String, extra: String = "") =
+            "$label — new: $fresh, already here: ${total - fresh}$extra\n   into ${routes.keys.joinToString { it.name }}" +
+                if (newLists > 0) " (${plural(newLists, "new list")})" else ""
+
+        fun run(): Int = routes.entries.sumOf { (b, list) -> add(books.ensure(ctx, b).id, list) }
+    }
+
+    /** Notes from a backup fill in notes that are missing or still blank here; a note that already has text is kept. */
+    private fun freshNotes(p: Backup.Parsed) = p.notes.filter { e ->
+        Books.validId(e.list) && !e.note.isBlank && (!Notes.books.has(this, e.list) || Notes.get(this, e.list).isBlank)
+    }.distinctBy { it.list }
+
     private fun previewImport(p: Backup.Parsed) {
-        val ids = Store.all(this).mapTo(HashSet()) { it.id }
-        val fresh = p.valid.count { it.id.isBlank() || it.id !in ids }
+        val ex = Incoming(Store.books, p.valid, { it.list }, p.lists.expenses, { it.id }, { b -> Store.all(this, b).mapTo(HashSet()) { it.id } }) { b, l -> Store.import(this, b, l) }
+        val checks = Incoming(Checklists.books, p.checklists, { it.list }, p.lists.checklists, { it.id }, { b -> Checklists.all(this, b).mapTo(HashSet()) { it.id } }) { b, l ->
+            Checklists.import(this, b, l)
+        }
+        val notes = freshNotes(p)
         val debtIds = Ledger.all(this).mapTo(HashSet()) { it.id }
         val freshPeople = p.people.count { it.id.isBlank() || it.id !in debtIds }
-        val wishIds = Wishlist.all(this).mapTo(HashSet()) { it.id }
-        val freshWish = p.wishlist.count { it.id.isBlank() || it.id !in wishIds }
-        val ideaIds = Ideas.all(this).mapTo(HashSet()) { it.id }
-        val freshIdeas = p.ideas.count { it.id.isBlank() || it.id !in ideaIds }
-        val total = fresh + freshPeople + freshWish + freshIdeas
+        val total = ex.fresh + freshPeople + checks.fresh + notes.size
 
-        val msg = StringBuilder("Expenses — new: $fresh, already here: ${p.valid.size - fresh}, invalid rows: ${p.invalid}")
+        val msg = StringBuilder(if (p.valid.isNotEmpty()) ex.line("Expenses", ", invalid rows: ${p.invalid}") else "Expenses — none, invalid rows: ${p.invalid}")
         if (p.people.isNotEmpty()) msg.append("\nPeople entries — new: $freshPeople, already here: ${p.people.size - freshPeople}")
-        if (p.wishlist.isNotEmpty()) msg.append("\nWishlist items — new: $freshWish, already here: ${p.wishlist.size - freshWish}")
-        if (p.ideas.isNotEmpty()) msg.append("\nIdeas — new: $freshIdeas, already here: ${p.ideas.size - freshIdeas}")
+        if (p.checklists.isNotEmpty()) msg.append("\n").append(checks.line("Checklist items"))
+        if (p.notes.isNotEmpty()) msg.append("\nNotes — new: ${notes.size}, already here: ${p.notes.size - notes.size}")
         msg.append("\n\nAnything that already exists is skipped.")
         val b = AlertDialog.Builder(this).setTitle("Import backup").setMessage(msg)
         if (total > 0) b.setPositiveButton("Import $total") { _, _ ->
-            val e = Store.import(this, p)
+            val e = ex.run()
             val d = Ledger.import(this, p.people)
-            val w = Wishlist.import(this, p.wishlist)
-            val i = Ideas.import(this, p.ideas)
-            toast(listOfNotNull("$e expenses", "$d people entries".takeIf { p.people.isNotEmpty() }, "$w wishlist items".takeIf { p.wishlist.isNotEmpty() }, "$i ideas".takeIf { p.ideas.isNotEmpty() })
+            val w = checks.run()
+            for (n in notes) {
+                Notes.books.ensure(this, p.lists.notes.firstOrNull { it.id == n.list } ?: Book(n.list, "Imported note"))
+                Notes.set(this, n.list, n.note)
+            }
+            toast(listOfNotNull("$e expenses", "$d people entries".takeIf { p.people.isNotEmpty() }, "$w checklist items".takeIf { p.checklists.isNotEmpty() }, plural(notes.size, "note").takeIf { p.notes.isNotEmpty() })
                 .joinToString(", ", prefix = "Imported "))
             render()
         }.setNegativeButton("Cancel", null) else b.setPositiveButton("OK", null)
@@ -892,21 +1094,22 @@ class MainActivity : Activity() {
     }
 
     private fun purgeMenu() {
-        val n = Store.all(this).size
-        if (n == 0) { toast("Nothing to purge"); return }
-        AlertDialog.Builder(this).setTitle("Purge expenses")
-            .setItems(arrayOf("Select months…", "Date range…", "All expenses ($n)")) { _, w ->
+        val n = Store.all(this, book()).size
+        val name = Store.books.current(this).name
+        if (n == 0) { toast("Nothing to purge in $name"); return }
+        AlertDialog.Builder(this).setTitle("Purge expenses · $name")
+            .setItems(arrayOf("Select months…", "Date range…", "All of $name ($n)")) { _, w ->
                 when (w) {
                     0 -> purgeMonths()
                     1 -> purgeRange()
-                    else -> confirmPurge(n, "all your expenses") { true }
+                    else -> confirmPurge(n, name) { true }
                 }
             }
             .show()
     }
 
     private fun purgeMonths() {
-        val groups = Store.all(this).groupBy { it.month }.entries.toList()
+        val groups = Store.all(this, book()).groupBy { it.month }.entries.toList()
         val labels = groups.map { (m, l) -> "${monthLabel(m)}  ·  ${l.size} entries  ·  ${money(l.totals().spent, false)}" }.toTypedArray()
         val checked = BooleanArray(groups.size)
         AlertDialog.Builder(this).setTitle("Purge months")
@@ -920,7 +1123,7 @@ class MainActivity : Activity() {
     }
 
     private fun purgeRange() {
-        val list = Store.all(this)
+        val list = Store.all(this, book())
         var from = parseDate(list.minOf { it.date }) ?: today()
         var to = YearMonth.now().minusMonths(1).atEndOfMonth() // default: everything before this month
         if (to < from) to = today()
@@ -957,7 +1160,7 @@ class MainActivity : Activity() {
     private fun confirmPurge(n: Int, what: String, predicate: (Expense) -> Boolean) {
         AlertDialog.Builder(this).setTitle("Delete $n entries?")
             .setMessage("This permanently removes every entry in $what.\n\nExport a backup first if you might need them later.")
-            .setPositiveButton("Purge") { _, _ -> toast("Purged ${Store.purge(this, predicate)} entries"); render() }
+            .setPositiveButton("Purge") { _, _ -> toast("Purged ${Store.purge(this, book(), predicate)} entries"); render() }
             .setNeutralButton("Export first") { _, _ -> export(true) }
             .setNegativeButton("Cancel", null).show()
     }

@@ -1,6 +1,7 @@
 package com.sanchit.expenses
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProvider
@@ -10,6 +11,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.net.Uri
 import android.os.Bundle
 import android.widget.RemoteViews
 import android.widget.RemoteViewsService
@@ -25,26 +27,85 @@ import kotlin.math.min
 object Widgets {
     fun refresh(ctx: Context) {
         val m = AppWidgetManager.getInstance(ctx) ?: return
-        AddWidget.update(ctx, m, m.getAppWidgetIds(ComponentName(ctx, AddWidget::class.java)))
-        ChartWidget.update(ctx, m, m.getAppWidgetIds(ComponentName(ctx, ChartWidget::class.java)))
-        PeopleWidget.update(ctx, m, m.getAppWidgetIds(ComponentName(ctx, PeopleWidget::class.java)))
-        WishWidget.update(ctx, m, m.getAppWidgetIds(ComponentName(ctx, WishWidget::class.java)))
-        IdeaWidget.update(ctx, m, m.getAppWidgetIds(ComponentName(ctx, IdeaWidget::class.java)))
+        fun ids(cls: Class<*>) = m.getAppWidgetIds(ComponentName(ctx, cls))
+        AddWidget.update(ctx, m, ids(AddWidget::class.java))
+        ChartWidget.update(ctx, m, ids(ChartWidget::class.java))
+        PeopleWidget.update(ctx, m, ids(PeopleWidget::class.java))
+        ChecklistWidget.update(ctx, m, ids(ChecklistWidget::class.java))
+        NoteWidget.update(ctx, m, ids(NoteWidget::class.java))
     }
 
-    fun openApp(ctx: Context): PendingIntent =
-        PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+    /** Opens the app; from a list widget, on that widget's tab and list. */
+    fun openApp(ctx: Context, widgetId: Int = 0, tab: Tab? = null, list: String? = null): PendingIntent = PendingIntent.getActivity(
+        ctx, 0,
+        Intent(ctx, MainActivity::class.java).apply {
+            if (tab != null) { putExtra("tab", tab.name).putExtra("list", list); tag(widgetId, "open") }
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        },
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
+
+    /** Makes an intent unique per widget and purpose, so two widgets' buttons and lists never share a PendingIntent or adapter. */
+    fun Intent.tag(widgetId: Int, what: String): Intent = setData(Uri.parse("expenses-widget://$widgetId/$what"))
+
+    /** A popup activity over the home screen. [mutable] for list templates, which rows fill in. */
+    fun popup(ctx: Context, cls: Class<*>, widgetId: Int, what: String, mutable: Boolean = false, extras: Intent.() -> Unit = {}): PendingIntent =
+        PendingIntent.getActivity(
+            ctx, 0,
+            Intent(ctx, cls).apply(extras).tag(widgetId, what).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
+            (if (mutable) PendingIntent.FLAG_MUTABLE else PendingIntent.FLAG_IMMUTABLE) or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+
+    /** Adapter intent for one widget's scrolling list. */
+    fun listIntent(ctx: Context, cls: Class<*>, widgetId: Int): Intent =
+        Intent(ctx, cls).putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, widgetId).tag(widgetId, "list")
+
+    /** The lists a widget can be pointed at, by the widget's kind; null for widgets without lists (People). */
+    fun booksFor(ctx: Context, widgetId: Int): Books? = when (AppWidgetManager.getInstance(ctx).getAppWidgetInfo(widgetId)?.provider?.className) {
+        AddWidget::class.java.name, ChartWidget::class.java.name -> Store.books
+        ChecklistWidget::class.java.name -> Checklists.books
+        NoteWidget::class.java.name -> Notes.books
+        else -> null
+    }
+}
+
+/**
+ * Asks which list a newly placed widget should show (and again when it's reconfigured from the home screen).
+ * With only one list there's nothing to ask, so it's picked straight away.
+ */
+class WidgetListActivity : Activity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val id = intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
+        val result = Intent().putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, id)
+        setResult(RESULT_CANCELED, result)
+        val books = if (id == AppWidgetManager.INVALID_APPWIDGET_ID) null else Widgets.booksFor(this, id)
+        if (books == null) { finish(); return }
+        val lists = books.all(this)
+        fun pick(b: Book) {
+            books.setWidget(this, id, b.id)
+            Widgets.refresh(this)
+            setResult(RESULT_OK, result)
+        }
+        if (lists.size == 1) { pick(lists[0]); finish(); return }
+        AlertDialog.Builder(this).setTitle("Which list should this widget show?")
+            .setSingleChoiceItems(lists.map { it.name }.toTypedArray(), lists.indexOf(books.forWidget(this, id))) { d, i -> pick(lists[i]); d.dismiss() }
+            .setNegativeButton("Cancel", null)
+            .setOnDismissListener { finish() }
+            .show()
+    }
 }
 
 /**
  * Popup over the home screen (the app itself never opens). Started by the Quick add widget:
- * "+ Spent" / "+ Got" add a new entry; tapping a listed entry (extra "id") edits it.
+ * "+ Spent" / "+ Got" add a new entry to the widget's list (extra "book"); tapping a listed entry (extra "id") edits it.
  */
 class QuickAddActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val existing = intent.getStringExtra("id")?.let { id -> Store.all(this).firstOrNull { it.id == id } }
-        EntryDialog.show(this, existing, intent.getStringExtra("type") ?: "spent", onDismiss = { finish() }) { msg ->
+        val book = Store.books.get(this, intent.getStringExtra("book")).id
+        val existing = intent.getStringExtra("id")?.let { id -> Store.all(this, book).firstOrNull { it.id == id } }
+        EntryDialog.show(this, book, existing, intent.getStringExtra("type") ?: "spent", onDismiss = { finish() }) { msg ->
             Toast.makeText(applicationContext, msg, Toast.LENGTH_SHORT).show()
         }
     }
@@ -52,61 +113,54 @@ class QuickAddActivity : Activity() {
 
 fun netText(v: Double) = (if (v < 0) "−" else "") + money(abs(v), false)
 
-/** Quick add: today's net + "+ Spent" / "+ Received" buttons. */
+/** Quick add, for one expense list: last 7 days' entries and net + "+ Spent" / "+ Received" buttons. */
 class AddWidget : AppWidgetProvider() {
     override fun onUpdate(ctx: Context, m: AppWidgetManager, ids: IntArray) = update(ctx, m, ids)
+
+    override fun onDeleted(ctx: Context, ids: IntArray) = ids.forEach { Books.forgetWidget(ctx, it) }
 
     companion object {
         fun update(ctx: Context, m: AppWidgetManager, ids: IntArray) {
             if (ids.isEmpty()) return
-            val v = RemoteViews(ctx.packageName, R.layout.widget_add)
-            // Net = spent − received (negative means more came in than went out)
-            val weekNet = recent(ctx).totals().net
-            v.setTextViewText(R.id.week, "Net ${netText(weekNet)}")
-            v.setTextColor(R.id.week, if (weekNet < 0) C.GREEN else C.TEXT)
-            @Suppress("DEPRECATION")
-            v.setRemoteAdapter(R.id.list, Intent(ctx, RecentService::class.java))
-            v.setEmptyView(R.id.list, R.id.empty)
-            // Each row fills in its entry id, so a tap opens that entry's edit popup
-            v.setPendingIntentTemplate(
-                R.id.list,
-                PendingIntent.getActivity(
-                    ctx, 3,
-                    Intent(ctx, QuickAddActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
-                    PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-                ),
-            )
-            v.setOnClickPendingIntent(R.id.add_spent, quickAdd(ctx, "spent", 1))
-            v.setOnClickPendingIntent(R.id.add_received, quickAdd(ctx, "received", 2))
-            v.setOnClickPendingIntent(R.id.header, Widgets.openApp(ctx))
-            m.updateAppWidget(ids, v)
+            for (id in ids) {
+                val book = Store.books.forWidget(ctx, id)
+                val v = RemoteViews(ctx.packageName, R.layout.widget_add)
+                v.setTextViewText(R.id.label, Store.books.label(ctx, book, "Last 7 days", " · 7 days"))
+                // Net = spent − received (negative means more came in than went out)
+                val weekNet = recent(ctx, book.id).totals().net
+                v.setTextViewText(R.id.week, "Net ${netText(weekNet)}")
+                v.setTextColor(R.id.week, if (weekNet < 0) C.GREEN else C.TEXT)
+                @Suppress("DEPRECATION")
+                v.setRemoteAdapter(R.id.list, Widgets.listIntent(ctx, RecentService::class.java, id))
+                v.setEmptyView(R.id.list, R.id.empty)
+                // Each row fills in its entry id, so a tap opens that entry's edit popup
+                v.setPendingIntentTemplate(R.id.list, Widgets.popup(ctx, QuickAddActivity::class.java, id, "edit", mutable = true) { putExtra("book", book.id) })
+                v.setOnClickPendingIntent(R.id.add_spent, Widgets.popup(ctx, QuickAddActivity::class.java, id, "spent") { putExtra("book", book.id).putExtra("type", "spent") })
+                v.setOnClickPendingIntent(R.id.add_received, Widgets.popup(ctx, QuickAddActivity::class.java, id, "received") { putExtra("book", book.id).putExtra("type", "received") })
+                v.setOnClickPendingIntent(R.id.header, Widgets.openApp(ctx, id, Tab.EXPENSES, book.id))
+                m.updateAppWidget(id, v)
+            }
             @Suppress("DEPRECATION")
             m.notifyAppWidgetViewDataChanged(ids, R.id.list)
         }
 
-        /** Entries dated within the last 7 days (today included), newest first. */
-        fun recent(ctx: Context): List<Expense> {
+        /** Entries of [book] dated within the last 7 days (today included), newest first. */
+        fun recent(ctx: Context, book: String): List<Expense> {
             val since = today().minusDays(6).toString()
-            return Store.all(ctx).filter { it.date >= since }
+            return Store.all(ctx, book).filter { it.date >= since }
         }
-
-        private fun quickAdd(ctx: Context, type: String, req: Int) = PendingIntent.getActivity(
-            ctx, req,
-            Intent(ctx, QuickAddActivity::class.java).putExtra("type", type)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
     }
 }
 
-/** Feeds the Quick add widget's scrollable list. */
+/** Feeds a Quick add widget's scrollable list. */
 class RecentService : RemoteViewsService() {
     override fun onGetViewFactory(intent: Intent): RemoteViewsFactory = object : RemoteViewsFactory {
+        private val widgetId = intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
         private var items = emptyList<Expense>()
 
         override fun onCreate() = Unit
         override fun onDestroy() = Unit
-        override fun onDataSetChanged() { items = AddWidget.recent(applicationContext) }
+        override fun onDataSetChanged() { items = AddWidget.recent(applicationContext, Store.books.forWidget(applicationContext, widgetId).id) }
         override fun getCount() = items.size
         override fun getLoadingView(): RemoteViews? = null
         override fun getViewTypeCount() = 1
@@ -126,9 +180,11 @@ class RecentService : RemoteViewsService() {
     }
 }
 
-/** Bar graph of net spending (spent − received) for the last 6 months. */
+/** Bar graph of net spending (spent − received) of one expense list for the last 6 months. */
 class ChartWidget : AppWidgetProvider() {
     override fun onUpdate(ctx: Context, m: AppWidgetManager, ids: IntArray) = update(ctx, m, ids)
+
+    override fun onDeleted(ctx: Context, ids: IntArray) = ids.forEach { Books.forgetWidget(ctx, it) }
 
     override fun onAppWidgetOptionsChanged(ctx: Context, m: AppWidgetManager, id: Int, options: Bundle) =
         update(ctx, m, intArrayOf(id))
@@ -138,24 +194,24 @@ class ChartWidget : AppWidgetProvider() {
             if (ids.isEmpty()) return
             val now = YearMonth.now()
             val months = (5 downTo 0).map { now.minusMonths(it.toLong()) }
-            val byMonth = Store.all(ctx).groupBy { it.month }
-            val values = months.map { byMonth[it.toString()].orEmpty().totals().net }
             val labels = months.map { it.month.getDisplayName(TextStyle.SHORT, Locale.ENGLISH) }
 
             for (id in ids) {
+                val book = Store.books.forWidget(ctx, id)
+                val byMonth = Store.all(ctx, book.id).groupBy { it.month }
+                val values = months.map { byMonth[it.toString()].orEmpty().totals().net }
                 val o = m.getAppWidgetOptions(id)
                 val wDp = o.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH).takeIf { it > 0 } ?: 250
                 val hDp = o.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT).takeIf { it > 0 } ?: 120
                 val v = RemoteViews(ctx.packageName, R.layout.widget_chart)
-                v.setTextViewText(R.id.caption, "Net · ${labels.last()}")
+                v.setTextViewText(R.id.caption, "${Store.books.label(ctx, book, "Net")} · ${labels.last()}")
                 v.setTextViewText(R.id.total, netText(values.last()))
                 v.setTextColor(R.id.total, if (values.last() < 0) C.GREEN else C.TEXT)
                 v.setImageViewBitmap(R.id.chart, draw(ctx, labels, values, wDp - 28, max(hDp - 58, 40)))
-                v.setOnClickPendingIntent(R.id.root, Widgets.openApp(ctx))
+                v.setOnClickPendingIntent(R.id.root, Widgets.openApp(ctx, id, Tab.REPORTS, book.id))
                 m.updateAppWidget(id, v)
             }
         }
-
         private fun draw(ctx: Context, labels: List<String>, values: List<Double>, wDp: Int, hDp: Int): Bitmap {
             // Cap the bitmap size so it stays well under the widget IPC limit
             val density = ctx.resources.displayMetrics.density
@@ -283,66 +339,76 @@ class PeopleService : RemoteViewsService() {
     }
 }
 
-/**
- * Popup over the home screen for the Wishlist widget: "+ Add item" adds; tapping a listed item
- * (extra "id") asks whether it was ordered and removes it.
- */
-class WishActivity : Activity() {
+/** Popup over the home screen for a Checklist widget's "+ Add" (extra "list"). */
+class ChecklistActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val done: (String) -> Unit = { msg -> Toast.makeText(applicationContext, msg, Toast.LENGTH_SHORT).show() }
-        val item = intent.getStringExtra("id")?.let { id -> Wishlist.all(this).firstOrNull { it.id == id } }
-        if (item != null) Wishlist.confirmOrdered(this, item, onDismiss = { finish() }, onDone = done)
-        else Wishlist.showAdd(this, onDismiss = { finish() }, onSaved = done)
+        val list = Checklists.books.get(this, intent.getStringExtra("list")).id
+        Checklists.showAdd(this, list, onDismiss = { finish() }) { msg -> Toast.makeText(applicationContext, msg, Toast.LENGTH_SHORT).show() }
     }
 }
 
-/** Wishlist: items to order (important first), tap one once ordered, "+ Add item" to add. */
-class WishWidget : AppWidgetProvider() {
+/** One checklist: its items, still-to-do first; tap an item to tick it off (or back on), "+ Add" to add. */
+class ChecklistWidget : AppWidgetProvider() {
     override fun onUpdate(ctx: Context, m: AppWidgetManager, ids: IntArray) = update(ctx, m, ids)
 
+    override fun onDeleted(ctx: Context, ids: IntArray) = ids.forEach { Books.forgetWidget(ctx, it) }
+
+    /** A tapped row ticks its item straight away, without opening anything. */
+    override fun onReceive(ctx: Context, intent: Intent) {
+        if (intent.action == TOGGLE) {
+            val list = intent.getStringExtra("list")
+            val id = intent.getStringExtra("id")
+            if (list != null && id != null && Checklists.books.has(ctx, list)) Checklists.toggle(ctx, list, id)
+        } else super.onReceive(ctx, intent)
+    }
+
     companion object {
+        private const val TOGGLE = "com.sanchit.expenses.TOGGLE"
+
         fun update(ctx: Context, m: AppWidgetManager, ids: IntArray) {
             if (ids.isEmpty()) return
-            val items = Wishlist.all(ctx)
-            val important = items.count { it.important }
-            val v = RemoteViews(ctx.packageName, R.layout.widget_wish)
-            v.setTextViewText(R.id.count, "${items.size} to order" + if (important > 0) " · $important ★" else "")
-            @Suppress("DEPRECATION")
-            v.setRemoteAdapter(R.id.list, Intent(ctx, WishService::class.java))
-            v.setEmptyView(R.id.list, R.id.empty)
-            v.setPendingIntentTemplate(
-                R.id.list,
-                PendingIntent.getActivity(
-                    ctx, 21,
-                    Intent(ctx, WishActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
-                    PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-                ),
-            )
-            v.setOnClickPendingIntent(
-                R.id.add_item,
-                PendingIntent.getActivity(
-                    ctx, 20,
-                    Intent(ctx, WishActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
-                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-                ),
-            )
-            v.setOnClickPendingIntent(R.id.header, Widgets.openApp(ctx))
-            m.updateAppWidget(ids, v)
+            for (id in ids) {
+                val book = Checklists.books.forWidget(ctx, id)
+                val items = Checklists.all(ctx, book.id)
+                val done = items.count { it.done }
+                val v = RemoteViews(ctx.packageName, R.layout.widget_checklist)
+                v.setTextViewText(R.id.label, book.name)
+                v.setTextViewText(R.id.count, when {
+                    items.isEmpty() -> ""
+                    done == items.size -> "All done"
+                    else -> "${items.size - done} to do" + if (done > 0) " · $done done" else ""
+                })
+                @Suppress("DEPRECATION")
+                v.setRemoteAdapter(R.id.list, Widgets.listIntent(ctx, ChecklistService::class.java, id))
+                v.setEmptyView(R.id.list, R.id.empty)
+                v.setPendingIntentTemplate(
+                    R.id.list,
+                    PendingIntent.getBroadcast(
+                        ctx, 0,
+                        with(Widgets) { Intent(ctx, ChecklistWidget::class.java).setAction(TOGGLE).putExtra("list", book.id).tag(id, "toggle") },
+                        PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                    ),
+                )
+                v.setOnClickPendingIntent(R.id.add_item, Widgets.popup(ctx, ChecklistActivity::class.java, id, "add") { putExtra("list", book.id) })
+                v.setOnClickPendingIntent(R.id.header, Widgets.openApp(ctx, id, Tab.CHECKLISTS, book.id))
+                m.updateAppWidget(id, v)
+            }
             @Suppress("DEPRECATION")
             m.notifyAppWidgetViewDataChanged(ids, R.id.list)
         }
     }
 }
 
-/** Feeds the Wishlist widget's list. */
-class WishService : RemoteViewsService() {
+/** Feeds a Checklist widget's list. */
+class ChecklistService : RemoteViewsService() {
     override fun onGetViewFactory(intent: Intent): RemoteViewsFactory = object : RemoteViewsFactory {
-        private var items = emptyList<WishItem>()
+        private val widgetId = intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
+        private var items = emptyList<CheckItem>()
 
         override fun onCreate() = Unit
         override fun onDestroy() = Unit
-        override fun onDataSetChanged() { items = Wishlist.all(applicationContext) }
+        override fun onDataSetChanged() { items = Checklists.all(applicationContext, Checklists.books.forWidget(applicationContext, widgetId).id) }
         override fun getCount() = items.size
         override fun getLoadingView(): RemoteViews? = null
         override fun getViewTypeCount() = 1
@@ -350,92 +416,91 @@ class WishService : RemoteViewsService() {
         override fun hasStableIds() = false
 
         override fun getViewAt(position: Int): RemoteViews {
-            val v = RemoteViews(packageName, R.layout.widget_row)
+            val v = RemoteViews(packageName, R.layout.widget_check_row)
             val w = items.getOrNull(position) ?: return v
-            v.setTextViewText(R.id.title, w.name)
-            v.setTextViewText(R.id.sub, (if (w.important) "Important · " else "") + "Added ${dayLabel(w.added)}")
-            v.setTextViewText(R.id.amt, if (w.important) "★" else "")
-            v.setTextColor(R.id.amt, C.AMBER)
+            v.setTextViewText(R.id.check, if (w.done) "✓" else "○")
+            v.setTextColor(R.id.check, if (w.done) C.GREEN else C.MUTED)
+            v.setTextViewText(R.id.title, if (w.done) struck(w.name) else w.name)
+            v.setTextColor(R.id.title, if (w.done) C.DIM else C.TEXT)
+            v.setTextViewText(R.id.star, if (w.important && !w.done) "★" else "")
             v.setOnClickFillInIntent(R.id.row, Intent().putExtra("id", w.id))
             return v
         }
     }
 }
 
-/**
- * Popup over the home screen for the Ideas widget: "+ Add idea" adds; tapping a listed idea
- * (extra "id") asks whether it's done and removes it.
- */
-class IdeaActivity : Activity() {
+fun struck(s: String) = android.text.SpannableString(s).apply {
+    setSpan(android.text.style.StrikethroughSpan(), 0, length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+}
+
+/** Popup over the home screen editing a Note widget's note (extra "list"). */
+class NoteActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val done: (String) -> Unit = { msg -> Toast.makeText(applicationContext, msg, Toast.LENGTH_SHORT).show() }
-        val item = intent.getStringExtra("id")?.let { id -> Ideas.all(this).firstOrNull { it.id == id } }
-        if (item != null) Ideas.confirmOrdered(this, item, onDismiss = { finish() }, onDone = done)
-        else Ideas.showAdd(this, onDismiss = { finish() }, onSaved = done)
+        NoteEditor.showSheet(this, Notes.books.get(this, intent.getStringExtra("list")).id) { finish() }
     }
 }
 
-/** Ideas (important first), tap one once done, "+ Add idea" to add. */
-class IdeaWidget : AppWidgetProvider() {
+/** One note's text (with its bold) on the home screen; tap it to edit in a popup. */
+class NoteWidget : AppWidgetProvider() {
     override fun onUpdate(ctx: Context, m: AppWidgetManager, ids: IntArray) = update(ctx, m, ids)
+
+    override fun onDeleted(ctx: Context, ids: IntArray) = ids.forEach { Books.forgetWidget(ctx, it) }
 
     companion object {
         fun update(ctx: Context, m: AppWidgetManager, ids: IntArray) {
             if (ids.isEmpty()) return
-            val items = Ideas.all(ctx)
-            val important = items.count { it.important }
-            val v = RemoteViews(ctx.packageName, R.layout.widget_idea)
-            v.setTextViewText(R.id.count, "${items.size} idea${if (items.size == 1) "" else "s"}" + if (important > 0) " · $important ★" else "")
-            @Suppress("DEPRECATION")
-            v.setRemoteAdapter(R.id.list, Intent(ctx, IdeaService::class.java))
-            v.setEmptyView(R.id.list, R.id.empty)
-            v.setPendingIntentTemplate(
-                R.id.list,
-                PendingIntent.getActivity(
-                    ctx, 31,
-                    Intent(ctx, IdeaActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
-                    PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-                ),
-            )
-            v.setOnClickPendingIntent(
-                R.id.add_item,
-                PendingIntent.getActivity(
-                    ctx, 30,
-                    Intent(ctx, IdeaActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
-                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-                ),
-            )
-            v.setOnClickPendingIntent(R.id.header, Widgets.openApp(ctx))
-            m.updateAppWidget(ids, v)
+            for (id in ids) {
+                val book = Notes.books.forWidget(ctx, id)
+                val v = RemoteViews(ctx.packageName, R.layout.widget_note)
+                v.setTextViewText(R.id.label, book.name)
+                @Suppress("DEPRECATION")
+                v.setRemoteAdapter(R.id.list, Widgets.listIntent(ctx, NoteService::class.java, id))
+                v.setEmptyView(R.id.list, R.id.empty)
+                val edit = Widgets.popup(ctx, NoteActivity::class.java, id, "edit") { putExtra("list", book.id) }
+                v.setPendingIntentTemplate(R.id.list, Widgets.popup(ctx, NoteActivity::class.java, id, "edit-line", mutable = true) { putExtra("list", book.id) })
+                v.setOnClickPendingIntent(R.id.empty, edit)
+                v.setOnClickPendingIntent(R.id.edit, edit)
+                v.setOnClickPendingIntent(R.id.header, Widgets.openApp(ctx, id, Tab.NOTES, book.id))
+                m.updateAppWidget(id, v)
+            }
             @Suppress("DEPRECATION")
             m.notifyAppWidgetViewDataChanged(ids, R.id.list)
         }
     }
 }
 
-/** Feeds the Ideas widget's list. */
-class IdeaService : RemoteViewsService() {
+/** Feeds a Note widget: one row per line, so long notes scroll. */
+class NoteService : RemoteViewsService() {
     override fun onGetViewFactory(intent: Intent): RemoteViewsFactory = object : RemoteViewsFactory {
-        private var items = emptyList<WishItem>()
+        private val widgetId = intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
+        private var lines = emptyList<CharSequence>()
 
         override fun onCreate() = Unit
         override fun onDestroy() = Unit
-        override fun onDataSetChanged() { items = Ideas.all(applicationContext) }
-        override fun getCount() = items.size
+        override fun onDataSetChanged() {
+            val note = Notes.get(applicationContext, Notes.books.forWidget(applicationContext, widgetId).id)
+            if (note.isBlank) { lines = emptyList(); return }
+            val text = RichText.spanned(note)
+            val out = ArrayList<CharSequence>()
+            var start = 0
+            while (start <= text.length) {
+                val end = text.indexOf('\n', start).let { if (it < 0) text.length else it }
+                out += text.subSequence(start, end)
+                start = end + 1
+            }
+            lines = out.dropLastWhile { it.isBlank() }
+        }
+        override fun getCount() = lines.size
         override fun getLoadingView(): RemoteViews? = null
         override fun getViewTypeCount() = 1
         override fun getItemId(position: Int) = position.toLong()
         override fun hasStableIds() = false
 
         override fun getViewAt(position: Int): RemoteViews {
-            val v = RemoteViews(packageName, R.layout.widget_row)
-            val w = items.getOrNull(position) ?: return v
-            v.setTextViewText(R.id.title, w.name)
-            v.setTextViewText(R.id.sub, (if (w.important) "Important · " else "") + "Added ${dayLabel(w.added)}")
-            v.setTextViewText(R.id.amt, if (w.important) "★" else "")
-            v.setTextColor(R.id.amt, C.AMBER)
-            v.setOnClickFillInIntent(R.id.row, Intent().putExtra("id", w.id))
+            val v = RemoteViews(packageName, R.layout.widget_note_line)
+            v.setTextViewText(R.id.line, lines.getOrNull(position)?.takeIf { it.isNotEmpty() } ?: " ")
+            v.setOnClickFillInIntent(R.id.line, Intent())
             return v
         }
     }

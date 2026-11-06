@@ -39,7 +39,7 @@
             android:windowSoftInputMode="stateAlwaysVisible|adjustResize" />
 
         <activity
-            android:name=".WishActivity"
+            android:name=".ChecklistActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|uiMode"
             android:excludeFromRecents="true"
             android:exported="false"
@@ -49,12 +49,12 @@
             android:windowSoftInputMode="stateAlwaysVisible|adjustResize" />
 
         <service
-            android:name=".WishService"
+            android:name=".ChecklistService"
             android:exported="false"
             android:permission="android.permission.BIND_REMOTEVIEWS" />
 
         <activity
-            android:name=".IdeaActivity"
+            android:name=".NoteActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|uiMode"
             android:excludeFromRecents="true"
             android:exported="false"
@@ -64,9 +64,21 @@
             android:windowSoftInputMode="stateAlwaysVisible|adjustResize" />
 
         <service
-            android:name=".IdeaService"
+            android:name=".NoteService"
             android:exported="false"
             android:permission="android.permission.BIND_REMOTEVIEWS" />
+
+        <!-- Picks the list a widget shows, when it's placed or reconfigured -->
+        <activity
+            android:name=".WidgetListActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:taskAffinity=""
+            android:theme="@style/QuickAddTheme">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_CONFIGURE" />
+            </intent-filter>
+        </activity>
 
         <service
             android:name=".PeopleService"
@@ -99,18 +111,18 @@
             <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_people_info" />
         </receiver>
 
-        <receiver android:name=".WishWidget" android:exported="false" android:label="Wishlist">
+        <receiver android:name=".ChecklistWidget" android:exported="false" android:label="Checklist">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
             </intent-filter>
-            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_wish_info" />
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_checklist_info" />
         </receiver>
 
-        <receiver android:name=".IdeaWidget" android:exported="false" android:label="Ideas">
+        <receiver android:name=".NoteWidget" android:exported="false" android:label="Note">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
             </intent-filter>
-            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_idea_info" />
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_note_info" />
         </receiver>
     </application>
 </manifest>
